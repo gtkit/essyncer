@@ -1,0 +1,20 @@
+{
+  "mappings": {
+    "properties": {
+      "id":         { "type": "long" },
+      "title":      { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart",
+                      "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+      "content":    { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+      "category":   { "type": "keyword" },
+      "author_id":  { "type": "long" },
+      "status":     { "type": "keyword" },
+      "created_at": { "type": "date" },
+      "updated_at": { "type": "date" },
+      "deleted_at": { "type": "date" }
+    }
+  },
+  "settings": {
+    "number_of_shards": 3,
+    "number_of_replicas": 1
+  }
+}

@@ -1,0 +1,31 @@
+elasticsearch:
+  addresses:
+    - "https://localhost:9200"
+  username: "elastic"
+  password: "changeme"
+  ca_cert: ""              # 生产环境请配置 CA 证书
+  allow_insecure_tls: false # 仅开发调试时显式开启
+  max_retries: 3
+  retry_on_status: [502, 503, 504, 429]
+
+sync:
+  workers: 4
+  flush_bytes: 5242880     # 5MB
+  flush_interval: 2s
+  default_batch_size: 1000
+
+  tables:
+    - model: "Article"
+      index_name: "articles"
+      mapping_file: "./mappings/articles.json"
+      batch_size: 500
+      auto_sync: true
+      soft_delete_mode: "update"
+      full_doc_update: false
+
+    - model: "User"
+      index_name: "users"
+      batch_size: 2000
+      auto_sync: true
+      soft_delete_mode: "delete"
+      full_doc_update: true
