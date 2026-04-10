@@ -189,6 +189,17 @@ func normalizeOutboxConfig(cfg Config) Config {
 	return cfg
 }
 
+func (s *Syncer) ensureOutboxStore() error {
+	if s.outbox != nil {
+		return nil
+	}
+	if s.db == nil {
+		return fmt.Errorf("essyncer: nil db")
+	}
+	s.outbox = newOutboxStore(s.db)
+	return nil
+}
+
 func (s *Syncer) Register(model Syncable, opts ...RegisterOption) error {
 	return s.registry.register(s.db, model, s.cfg.Sync.DefaultBatchSize, opts...)
 }

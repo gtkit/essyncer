@@ -13,6 +13,13 @@ import (
 	"go.uber.org/zap"
 )
 
+type outboxBatchResult struct {
+	Claimed   int
+	Processed int64
+	Retried   int64
+	Dead      int64
+}
+
 func (s *Syncer) StartOutboxRelay(ctx context.Context) error {
 	s.relayMu.Lock()
 	defer s.relayMu.Unlock()
@@ -26,8 +33,8 @@ func (s *Syncer) StartOutboxRelay(ctx context.Context) error {
 	if s.db == nil {
 		return fmt.Errorf("essyncer: start outbox relay: nil db")
 	}
-	if s.outbox == nil {
-		s.outbox = newOutboxStore(s.db)
+	if err := s.ensureOutboxStore(); err != nil {
+		return fmt.Errorf("essyncer: start outbox relay: %w", err)
 	}
 
 	relayCtx := ctx
@@ -42,7 +49,7 @@ func (s *Syncer) StartOutboxRelay(ctx context.Context) error {
 
 	go func() {
 		defer s.relayWG.Done()
-		s.runOutboxRelay(relayCtx)
+		_, _ = s.runOutboxRelay(relayCtx)
 
 		s.relayMu.Lock()
 		s.relayRunning = false
@@ -83,7 +90,8 @@ func (s *Syncer) waitOutboxRelay(ctx context.Context) error {
 	}
 }
 
-func (s *Syncer) runOutboxRelay(ctx context.Context) {
+func (s *Syncer) runOutboxRelay(ctx context.Context) (outboxBatchResult, error) {
+	var total outboxBatchResult
 	pollInterval := s.cfg.Outbox.PollInterval
 	if pollInterval <= 0 {
 		pollInterval = 2 * time.Second
@@ -95,34 +103,54 @@ func (s *Syncer) runOutboxRelay(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return total, nil
 		case <-timer.C:
 		}
 
-		s.runOutboxBatch(ctx)
+		batch, err := s.runOutboxBatch(ctx)
+		total.Claimed += batch.Claimed
+		total.Processed += batch.Processed
+		total.Retried += batch.Retried
+		total.Dead += batch.Dead
+		if err != nil && ctx.Err() == nil {
+			s.recordFailure(FailureEvent{
+				Source: failureSourceRelay,
+				Error:  err.Error(),
+			})
+			s.logger.Warn("essyncer: relay claim pending", zap.Error(err))
+		}
 		timer.Reset(pollInterval)
 	}
 }
 
-func (s *Syncer) runOutboxBatch(ctx context.Context) {
+func (s *Syncer) runOutboxBatch(ctx context.Context) (outboxBatchResult, error) {
+	var batch outboxBatchResult
 	rows, err := s.outbox.claimPending(ctx, s.cfg.Outbox.BatchSize, s.cfg.Outbox.Lease)
 	if err != nil {
 		if ctx.Err() != nil {
-			return
+			return batch, nil
 		}
-		s.recordFailure(FailureEvent{
-			Source: failureSourceRelay,
-			Error:  err.Error(),
-		})
-		s.logger.Warn("essyncer: relay claim pending", zap.Error(err))
-		return
+		return batch, fmt.Errorf("relay claim pending: %w", err)
 	}
+	batch.Claimed = len(rows)
 	for _, row := range rows {
-		s.processOutboxRow(ctx, row)
+		outcome, err := s.processOutboxRow(ctx, row)
+		if err != nil {
+			return batch, err
+		}
+		switch outcome {
+		case OutboxStatusSent:
+			batch.Processed++
+		case OutboxStatusPending:
+			batch.Retried++
+		case OutboxStatusDead:
+			batch.Dead++
+		}
 	}
+	return batch, nil
 }
 
-func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) {
+func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) (string, error) {
 	rowCtx, cancel := context.WithTimeout(ctx, s.outboxSendTimeout())
 	defer cancel()
 	storeCtx := flushContext(ctx)
@@ -137,10 +165,10 @@ func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) {
 				DocumentID: row.DocumentID,
 				Error:      err.Error(),
 			})
-			return
+			return "", err
 		}
 		s.metrics.RelayProcessedTotal.Add(1)
-		return
+		return OutboxStatusSent, nil
 	}
 
 	retryable := status == 0 || classifyRetryable(status)
@@ -165,10 +193,10 @@ func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) {
 				Status:     status,
 				Error:      err.Error(),
 			})
-			return
+			return "", err
 		}
 		s.metrics.RelayRetriesTotal.Add(1)
-		return
+		return OutboxStatusPending, nil
 	}
 
 	if err := s.outbox.markDead(storeCtx, row, sendErr); err != nil {
@@ -180,7 +208,7 @@ func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) {
 			Status:     status,
 			Error:      err.Error(),
 		})
-		return
+		return "", err
 	}
 
 	s.metrics.DeadLetters.Add(1)
@@ -194,6 +222,7 @@ func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) {
 		Error:      sendErr.Error(),
 		Retryable:  false,
 	})
+	return OutboxStatusDead, nil
 }
 
 func (s *Syncer) outboxSendTimeout() time.Duration {

@@ -10,6 +10,7 @@ const defaultFailureBufferSize = 128
 const (
 	failureSourceCallback = "callback"
 	failureSourceFullSync = "fullsync"
+	failureSourceOps      = "ops"
 	failureSourceRelay    = "relay"
 	failureSourceDead     = "relay_dead"
 	failureSourceTxSkip   = "tx_skip"

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/yourorg/essyncer"
-	"github.com/yourorg/essyncer/searcher"
+	"github.com/gtkit/essyncer"
+	"github.com/gtkit/essyncer/searcher"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )

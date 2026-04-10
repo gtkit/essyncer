@@ -21,6 +21,7 @@ type Syncable interface {
 
 type modelEntry struct {
 	modelType      reflect.Type
+	schema         *schema.Schema
 	tableName      string
 	indexName      string
 	mapping        json.RawMessage
@@ -53,6 +54,7 @@ func (r *modelRegistry) register(db *gorm.DB, model Syncable, defaultBatchSize i
 	tableName := stmt.Schema.Table
 	entry := &modelEntry{
 		modelType:      reflect.TypeOf(model).Elem(),
+		schema:         stmt.Schema,
 		tableName:      tableName,
 		indexName:      tableName,
 		batchSize:      defaultBatchSize,

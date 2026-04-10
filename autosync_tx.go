@@ -30,11 +30,8 @@ func (s *Syncer) persistSyncEvents(ctx context.Context, tx *gorm.DB, events []sy
 	if len(events) == 0 {
 		return nil
 	}
-	if s.outbox == nil {
-		if s.db == nil {
-			return fmt.Errorf("persist outbox events: nil db")
-		}
-		s.outbox = newOutboxStore(s.db)
+	if err := s.ensureOutboxStore(); err != nil {
+		return fmt.Errorf("persist outbox events: %w", err)
 	}
 
 	rows := make([]outboxWriteEvent, 0, len(events))
