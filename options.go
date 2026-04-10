@@ -55,6 +55,38 @@ func WithDefaultBatchSize(size int) Option {
 	}
 }
 
+func WithOutboxPollInterval(d time.Duration) Option {
+	return func(s *Syncer) {
+		if d > 0 {
+			s.cfg.Outbox.PollInterval = d
+		}
+	}
+}
+
+func WithOutboxBatchSize(size int) Option {
+	return func(s *Syncer) {
+		if size > 0 {
+			s.cfg.Outbox.BatchSize = size
+		}
+	}
+}
+
+func WithOutboxMaxAttempts(maxAttempts int) Option {
+	return func(s *Syncer) {
+		if maxAttempts > 0 {
+			s.cfg.Outbox.MaxAttempts = maxAttempts
+		}
+	}
+}
+
+func WithOutboxLease(d time.Duration) Option {
+	return func(s *Syncer) {
+		if d > 0 {
+			s.cfg.Outbox.Lease = d
+		}
+	}
+}
+
 // --- RegisterOption ---
 
 type RegisterOption func(*modelEntry)
@@ -81,6 +113,15 @@ func WithSoftDeleteMode(mode SoftDeleteMode) RegisterOption {
 }
 func WithFullDocUpdate(enabled bool) RegisterOption {
 	return func(e *modelEntry) { e.fullDocUpdate = enabled }
+}
+
+// WithFullSyncScanStrategy overrides the per-model full-sync scan strategy.
+func WithFullSyncScanStrategy(strategy FullSyncScanStrategy) RegisterOption {
+	return func(e *modelEntry) {
+		if strategy != nil {
+			e.fullSyncScan = strategy
+		}
+	}
 }
 
 func WithMappingMap(m map[string]any) RegisterOption {

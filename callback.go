@@ -16,33 +16,53 @@ const (
 	cbAfterDeleteCommit = "essyncer:after_delete_commit"
 )
 
-func (s *Syncer) EnableAutoSync(db *gorm.DB) error {
-	if err := db.Callback().Create().After("gorm:create").Register(cbAfterCreate, s.afterCreate); err != nil {
+func (s *Syncer) EnableAutoSync(db *gorm.DB, models ...Syncable) error {
+	if len(models) == 0 {
+		s.registry.setAutoSyncAll(true)
+	} else {
+		s.registry.setAutoSyncAll(false)
+		if err := s.registry.setAutoSyncForModels(db, true, models...); err != nil {
+			return err
+		}
+	}
+
+	s.removeAutoSyncCallbacks(db)
+
+	if err := db.Callback().Create().Before("gorm:after_create").Register(cbAfterCreate, s.afterCreate); err != nil {
 		return err
 	}
 	if err := db.Callback().Create().After("gorm:commit_or_rollback_transaction").Register(cbAfterCreateCommit, s.afterCommit); err != nil {
 		return err
 	}
-	if err := db.Callback().Update().After("gorm:update").Register(cbAfterUpdate, s.afterUpdate); err != nil {
+	if err := db.Callback().Update().Before("gorm:after_update").Register(cbAfterUpdate, s.afterUpdate); err != nil {
 		return err
 	}
 	if err := db.Callback().Update().After("gorm:commit_or_rollback_transaction").Register(cbAfterUpdateCommit, s.afterCommit); err != nil {
 		return err
 	}
-	if err := db.Callback().Delete().After("gorm:delete").Register(cbAfterDelete, s.afterDelete); err != nil {
+	if err := db.Callback().Delete().Before("gorm:after_delete").Register(cbAfterDelete, s.afterDelete); err != nil {
 		return err
 	}
 	return db.Callback().Delete().After("gorm:commit_or_rollback_transaction").Register(cbAfterDeleteCommit, s.afterCommit)
 }
 
-func (s *Syncer) DisableAutoSync(db *gorm.DB) error {
+func (s *Syncer) DisableAutoSync(db *gorm.DB, models ...Syncable) error {
+	if len(models) == 0 {
+		s.registry.setAutoSyncAll(false)
+		s.removeAutoSyncCallbacks(db)
+		return nil
+	}
+
+	return s.registry.setAutoSyncForModels(db, false, models...)
+}
+
+func (s *Syncer) removeAutoSyncCallbacks(db *gorm.DB) {
 	_ = db.Callback().Create().Remove(cbAfterCreate)
 	_ = db.Callback().Create().Remove(cbAfterCreateCommit)
 	_ = db.Callback().Update().Remove(cbAfterUpdate)
 	_ = db.Callback().Update().Remove(cbAfterUpdateCommit)
 	_ = db.Callback().Delete().Remove(cbAfterDelete)
 	_ = db.Callback().Delete().Remove(cbAfterDeleteCommit)
-	return nil
 }
 
 func (s *Syncer) afterCreate(db *gorm.DB) {
@@ -58,6 +78,7 @@ func (s *Syncer) afterCreate(db *gorm.DB) {
 		if syncable, ok := m.(Syncable); ok {
 			events = append(events, syncEvent{
 				source:    failureSourceCallback,
+				tableName: entry.tableName,
 				action:    actionIndex,
 				indexName: entry.indexName,
 				docID:     syncable.GetID(),
@@ -85,6 +106,7 @@ func (s *Syncer) afterUpdate(db *gorm.DB) {
 		if entry.fullDocUpdate {
 			events = append(events, syncEvent{
 				source:    failureSourceCallback,
+				tableName: entry.tableName,
 				action:    actionIndex,
 				indexName: entry.indexName,
 				docID:     syncable.GetID(),
@@ -95,6 +117,7 @@ func (s *Syncer) afterUpdate(db *gorm.DB) {
 			if len(changed) == 0 {
 				events = append(events, syncEvent{
 					source:    failureSourceCallback,
+					tableName: entry.tableName,
 					action:    actionIndex,
 					indexName: entry.indexName,
 					docID:     syncable.GetID(),
@@ -104,6 +127,7 @@ func (s *Syncer) afterUpdate(db *gorm.DB) {
 			}
 			events = append(events, syncEvent{
 				source:    failureSourceCallback,
+				tableName: entry.tableName,
 				action:    actionUpdate,
 				indexName: entry.indexName,
 				docID:     syncable.GetID(),
@@ -135,6 +159,7 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 			case SoftDeleteModeUpdate:
 				events = append(events, syncEvent{
 					source:    failureSourceCallback,
+					tableName: entry.tableName,
 					action:    actionUpdate,
 					indexName: entry.indexName,
 					docID:     syncable.GetID(),
@@ -143,6 +168,7 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 			case SoftDeleteModeDelete:
 				events = append(events, syncEvent{
 					source:    failureSourceCallback,
+					tableName: entry.tableName,
 					action:    actionDelete,
 					indexName: entry.indexName,
 					docID:     syncable.GetID(),
@@ -151,6 +177,7 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 		} else {
 			events = append(events, syncEvent{
 				source:    failureSourceCallback,
+				tableName: entry.tableName,
 				action:    actionDelete,
 				indexName: entry.indexName,
 				docID:     syncable.GetID(),
@@ -161,22 +188,41 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 }
 
 func (s *Syncer) resolveModels(db *gorm.DB) ([]any, *modelEntry) {
-	if db.Statement == nil || db.Statement.Schema == nil {
+	if db.Statement == nil {
 		return nil, nil
 	}
-	entry, ok := s.registry.get(db.Statement.Schema.Table)
+	var (
+		entry *modelEntry
+		ok    bool
+	)
+	if db.Statement.Schema != nil {
+		entry, ok = s.registry.get(db.Statement.Schema.Table)
+	} else if db.Statement.Table != "" {
+		entry, ok = s.registry.get(db.Statement.Table)
+	}
+	if !ok && db.Statement.Model != nil {
+		stmt := &gorm.Statement{DB: db}
+		if err := stmt.Parse(db.Statement.Model); err == nil && stmt.Schema != nil {
+			entry, ok = s.registry.get(stmt.Schema.Table)
+		}
+	}
 	if !ok {
 		return nil, nil
 	}
 	dest := db.Statement.Dest
 	if dest == nil {
-		return nil, nil
+		dest = db.Statement.Model
 	}
 	if models := extractModels(reflect.ValueOf(dest)); len(models) > 0 {
 		return models, entry
 	}
 	if db.Statement.ReflectValue.IsValid() {
 		if models := extractModels(db.Statement.ReflectValue); len(models) > 0 {
+			return models, entry
+		}
+	}
+	if db.Statement.Model != nil {
+		if models := extractModels(reflect.ValueOf(db.Statement.Model)); len(models) > 0 {
 			return models, entry
 		}
 	}
@@ -221,16 +267,20 @@ func extractModels(v reflect.Value) []any {
 }
 
 func extractChangedFields(db *gorm.DB) map[string]any {
-	if db.Statement == nil || db.Statement.Schema == nil {
+	if db.Statement == nil {
 		return nil
 	}
-	changed := make(map[string]any)
 	if dest, ok := db.Statement.Dest.(map[string]any); ok {
+		changed := make(map[string]any, len(dest))
 		for k, v := range dest {
 			changed[k] = v
 		}
 		return changed
 	}
+	if db.Statement.Schema == nil {
+		return nil
+	}
+	changed := make(map[string]any)
 	destVal := reflect.ValueOf(db.Statement.Dest)
 	if destVal.Kind() == reflect.Ptr {
 		destVal = destVal.Elem()

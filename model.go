@@ -1,13 +1,17 @@
 package essyncer
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"sync"
+	"time"
+
 	"github.com/jinzhu/copier"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
-	"reflect"
-	"sync"
 )
 
 // Syncable 是需要同步到 ES 的 GORM 模型必须实现的接口。
@@ -26,6 +30,7 @@ type modelEntry struct {
 	softDeleteMode SoftDeleteMode
 	fullDocUpdate  bool
 	hasSoftDelete  bool
+	fullSyncScan   FullSyncScanStrategy
 }
 
 type modelRegistry struct {
@@ -33,6 +38,12 @@ type modelRegistry struct {
 }
 
 func newModelRegistry() *modelRegistry { return &modelRegistry{} }
+
+type fullSyncKey struct {
+	columnName string
+	field      *schema.Field
+	unsigned   bool
+}
 
 func (r *modelRegistry) register(db *gorm.DB, model Syncable, defaultBatchSize int, opts ...RegisterOption) error {
 	stmt := &gorm.Statement{DB: db}
@@ -48,6 +59,7 @@ func (r *modelRegistry) register(db *gorm.DB, model Syncable, defaultBatchSize i
 		autoSync:       true,
 		softDeleteMode: SoftDeleteModeUpdate,
 		hasSoftDelete:  hasSoftDeleteField(model),
+		fullSyncScan:   newDefaultFullSyncScanStrategy(stmt.Schema),
 	}
 	for _, opt := range opts {
 		opt(entry)
@@ -98,6 +110,112 @@ func (r *modelRegistry) forEach(fn func(string, *modelEntry) bool) {
 	})
 }
 
+func (r *modelRegistry) setAutoSyncAll(enabled bool) {
+	r.entries.Range(func(_, value any) bool {
+		value.(*modelEntry).autoSync = enabled
+		return true
+	})
+}
+
+func (r *modelRegistry) setAutoSyncForModels(db *gorm.DB, enabled bool, models ...Syncable) error {
+	for _, model := range models {
+		entry, ok := r.getByModel(db, model)
+		if !ok {
+			return fmt.Errorf("essyncer: model %s not registered", getTableName(db, model))
+		}
+		entry.autoSync = enabled
+	}
+	return nil
+}
+
+func (r *modelRegistry) entriesForModels(db *gorm.DB, models ...Syncable) ([]*modelEntry, error) {
+	if len(models) == 0 {
+		return r.allEntries(), nil
+	}
+
+	entries := make([]*modelEntry, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		entry, ok := r.getByModel(db, model)
+		if !ok {
+			return nil, fmt.Errorf("essyncer: model %s not registered", getTableName(db, model))
+		}
+		if _, ok := seen[entry.tableName]; ok {
+			continue
+		}
+		seen[entry.tableName] = struct{}{}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func (e *modelEntry) fullSyncInfo() FullSyncModelInfo {
+	return FullSyncModelInfo{
+		TableName:     e.tableName,
+		IndexAlias:    e.indexName,
+		HasSoftDelete: e.hasSoftDelete,
+	}
+}
+
+func newFullSyncKey(s *schema.Schema) (*fullSyncKey, error) {
+	if len(s.PrimaryFields) != 1 {
+		return nil, fmt.Errorf("requires exactly one integer primary key, got %d primary key fields", len(s.PrimaryFields))
+	}
+
+	field := s.PrimaryFields[0]
+	switch field.IndirectFieldType.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return &fullSyncKey{
+			columnName: cmp.Or(field.DBName, field.Name),
+			field:      field,
+		}, nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return &fullSyncKey{
+			columnName: cmp.Or(field.DBName, field.Name),
+			field:      field,
+			unsigned:   true,
+		}, nil
+	default:
+		return nil, fmt.Errorf(
+			"requires exactly one integer primary key, got %s (%s)",
+			field.Name,
+			field.IndirectFieldType.String(),
+		)
+	}
+}
+
+func newDefaultFullSyncScanStrategy(s *schema.Schema) FullSyncScanStrategy {
+	key, err := newFullSyncKey(s)
+	if err != nil {
+		return unsupportedFullSyncScanStrategy{err: err}
+	}
+	return integerPrimaryKeyScanStrategy{key: key}
+}
+
+func (e *modelEntry) fullSyncCursor(startID int64) (FullSyncScanCursor, error) {
+	if e.fullSyncScan == nil {
+		return nil, fmt.Errorf("essyncer: full sync table %s has no scan strategy", e.tableName)
+	}
+	return e.fullSyncScan.Prepare(e.fullSyncInfo(), startID)
+}
+
+func (k *fullSyncKey) valueOf(ctx context.Context, v reflect.Value) (any, error) {
+	value, _ := k.field.ValueOf(ctx, v)
+	if value == nil {
+		return nil, fmt.Errorf("primary key %s is nil", k.columnName)
+	}
+
+	fieldValue := reflect.ValueOf(value)
+	switch fieldValue.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return fieldValue.Int(), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return fieldValue.Uint(), nil
+	default:
+		return nil, fmt.Errorf("primary key %s is not an integer (%T)", k.columnName, value)
+	}
+}
+
 // --- 反射工具 ---
 
 func hasSoftDeleteField(model any) bool {
@@ -145,20 +263,8 @@ func getTableName(db *gorm.DB, model any) string {
 	return stmt.Schema.Table
 }
 
-func extractID(v reflect.Value) int64 {
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	for _, name := range []string{"ID", "Id"} {
-		field := v.FieldByName(name)
-		if field.IsValid() && field.CanInt() {
-			return field.Int()
-		}
-		if field.IsValid() && field.CanUint() {
-			return int64(field.Uint())
-		}
-	}
-	return 0
+func (e *modelEntry) newManagedIndexName(kind string, now time.Time) string {
+	return fmt.Sprintf("%s__%s__%d", e.indexName, kind, now.UnixNano())
 }
 
 // deepCopyModel 使用 copier 做高性能深拷贝，map 类型直接返回。

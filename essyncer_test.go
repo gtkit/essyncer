@@ -5,6 +5,7 @@ import (
 	"gorm.io/gorm"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,22 +84,74 @@ func TestHasSoftDeleteField(t *testing.T) {
 	}
 }
 
-// --- ExtractID ---
+// --- Full Sync Key ---
 
-func TestExtractID(t *testing.T) {
+func TestNewFullSyncKey(t *testing.T) {
 	tests := []struct {
-		name string
-		val  any
-		want int64
+		name            string
+		model           any
+		wantColumn      string
+		wantUnsigned    bool
+		wantErrContains string
 	}{
-		{"int64", testArticle{ID: 42}, 42},
-		{"uint", struct{ ID uint }{100}, 100},
-		{"zero", testArticle{}, 0},
+		{
+			name:         "int64 id is supported",
+			model:        &testArticle{},
+			wantColumn:   "id",
+			wantUnsigned: false,
+		},
+		{
+			name: "uint id is supported",
+			model: &struct {
+				ID uint `gorm:"primaryKey"`
+			}{},
+			wantColumn:   "id",
+			wantUnsigned: true,
+		},
+		{
+			name: "string id is rejected",
+			model: &struct {
+				ID string `gorm:"primaryKey"`
+			}{},
+			wantErrContains: "requires exactly one integer primary key",
+		},
+		{
+			name: "composite primary key is rejected",
+			model: &struct {
+				TenantID int64 `gorm:"primaryKey"`
+				ID       int64 `gorm:"primaryKey"`
+			}{},
+			wantErrContains: "requires exactly one integer primary key",
+		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := extractID(reflect.ValueOf(tt.val)); got != tt.want {
-				t.Errorf("got %v, want %v", got, tt.want)
+			db := openBlockerTestDB(t)
+			stmt := &gorm.Statement{DB: db}
+			if err := stmt.Parse(tt.model); err != nil {
+				t.Fatalf("parse model: %v", err)
+			}
+
+			key, err := newFullSyncKey(stmt.Schema)
+			if tt.wantErrContains != "" {
+				if err == nil {
+					t.Fatal("expected full sync key error")
+				}
+				if !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Fatalf("error = %q, want containing %q", err.Error(), tt.wantErrContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("new full sync key: %v", err)
+			}
+			if key.columnName != tt.wantColumn {
+				t.Fatalf("column name = %q, want %q", key.columnName, tt.wantColumn)
+			}
+			if key.unsigned != tt.wantUnsigned {
+				t.Fatalf("unsigned = %v, want %v", key.unsigned, tt.wantUnsigned)
 			}
 		})
 	}
@@ -157,7 +210,9 @@ func TestDeepCopyModel_Struct(t *testing.T) {
 func TestLoadMappingFromFile_ValidJSON(t *testing.T) {
 	tmp := t.TempDir() + "/m.json"
 	data, _ := json.Marshal(map[string]any{"mappings": map[string]any{}})
-	os.WriteFile(tmp, data, 0o644)
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		t.Fatalf("write valid mapping: %v", err)
+	}
 
 	result, err := LoadMappingFromFile(tmp)
 	if err != nil {
@@ -170,7 +225,9 @@ func TestLoadMappingFromFile_ValidJSON(t *testing.T) {
 
 func TestLoadMappingFromFile_InvalidJSON(t *testing.T) {
 	tmp := t.TempDir() + "/bad.json"
-	os.WriteFile(tmp, []byte("not json"), 0o644)
+	if err := os.WriteFile(tmp, []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write invalid mapping: %v", err)
+	}
 	_, err := LoadMappingFromFile(tmp)
 	if err == nil {
 		t.Error("expected error")

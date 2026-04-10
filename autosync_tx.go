@@ -3,68 +3,20 @@ package essyncer
 import (
 	"context"
 	"database/sql"
-	"sync"
-	"time"
+	"fmt"
 
-	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-const instanceSyncEventsKey = "essyncer:sync_events"
+const instanceOutboxPersistedCountKey = "essyncer:outbox_persisted_count"
 
 type syncEvent struct {
 	source    string
+	tableName string
 	action    actionType
 	indexName string
 	docID     string
 	doc       any
-}
-
-type syncEventBuffer struct {
-	mu     sync.Mutex
-	events []syncEvent
-}
-
-type syncBufferContextKey struct{}
-
-func newSyncEventBuffer() *syncEventBuffer {
-	return &syncEventBuffer{}
-}
-
-func (b *syncEventBuffer) append(events ...syncEvent) {
-	if len(events) == 0 {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.events = append(b.events, events...)
-}
-
-func (b *syncEventBuffer) snapshot() []syncEvent {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.events) == 0 {
-		return nil
-	}
-	events := make([]syncEvent, len(b.events))
-	copy(events, b.events)
-	return events
-}
-
-func withSyncBuffer(ctx context.Context) (context.Context, *syncEventBuffer) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	buffer := newSyncEventBuffer()
-	return context.WithValue(ctx, syncBufferContextKey{}, buffer), buffer
-}
-
-func syncBufferFromContext(ctx context.Context) *syncEventBuffer {
-	if ctx == nil {
-		return nil
-	}
-	buffer, _ := ctx.Value(syncBufferContextKey{}).(*syncEventBuffer)
-	return buffer
 }
 
 func flushContext(ctx context.Context) context.Context {
@@ -74,40 +26,52 @@ func flushContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-func getOrInitInstanceSyncBuffer(db *gorm.DB) *syncEventBuffer {
-	if value, ok := db.InstanceGet(instanceSyncEventsKey); ok {
-		if buffer, ok := value.(*syncEventBuffer); ok {
-			return buffer
+func (s *Syncer) persistSyncEvents(ctx context.Context, tx *gorm.DB, events []syncEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	if s.outbox == nil {
+		if s.db == nil {
+			return fmt.Errorf("persist outbox events: nil db")
 		}
+		s.outbox = newOutboxStore(s.db)
 	}
-	buffer := newSyncEventBuffer()
-	db.InstanceSet(instanceSyncEventsKey, buffer)
-	return buffer
-}
 
-func startedTransaction(db *gorm.DB) bool {
-	if db == nil {
-		return false
-	}
-	_, ok := db.InstanceGet("gorm:started_transaction")
-	return ok
-}
-
-func isUserManagedTransaction(db *gorm.DB) bool {
-	if db == nil || db.Statement == nil || startedTransaction(db) {
-		return false
-	}
-	_, ok := db.Statement.ConnPool.(gorm.TxCommitter)
-	return ok
-}
-
-func (s *Syncer) flushSyncEvents(ctx context.Context, events []syncEvent) {
-	start := time.Now()
+	rows := make([]outboxWriteEvent, 0, len(events))
 	for _, event := range events {
-		s.enqueue(ctx, event.source, event.action, event.indexName, event.docID, event.doc)
+		rows = append(rows, outboxWriteEvent{
+			TableName:  event.tableName,
+			IndexAlias: event.indexName,
+			DocumentID: event.docID,
+			Action:     event.action,
+			Doc:        event.doc,
+		})
 	}
-	s.metrics.SyncEventsFlushed.Add(int64(len(events)))
-	s.recordFlush(start, len(events))
+
+	persistDB := tx
+	if persistDB == nil {
+		persistDB = s.db
+	}
+	persistDB = persistDB.Session(&gorm.Session{NewDB: true}).Model(&OutboxEvent{})
+	if err := s.outbox.insertFromEvents(ctx, persistDB, rows); err != nil {
+		s.metrics.DroppedTotal.Add(int64(len(events)))
+		for _, event := range events {
+			s.recordFailure(FailureEvent{
+				Source:     event.source,
+				Index:      event.indexName,
+				Action:     string(event.action),
+				DocumentID: event.docID,
+				Error:      err.Error(),
+			})
+		}
+		return fmt.Errorf("persist outbox events: %w", err)
+	}
+	if tx != nil {
+		current, _ := tx.InstanceGet(instanceOutboxPersistedCountKey)
+		count, _ := current.(int64)
+		tx.InstanceSet(instanceOutboxPersistedCountKey, count+int64(len(events)))
+	}
+	return nil
 }
 
 func (s *Syncer) enqueueEvents(db *gorm.DB, events ...syncEvent) {
@@ -115,63 +79,24 @@ func (s *Syncer) enqueueEvents(db *gorm.DB, events ...syncEvent) {
 		return
 	}
 
-	if buffer := syncBufferFromContext(db.Statement.Context); buffer != nil {
-		buffer.append(events...)
-		s.metrics.SyncEventsBuffered.Add(int64(len(events)))
-		return
+	if err := s.persistSyncEvents(flushContext(db.Statement.Context), db, events); err != nil {
+		_ = db.AddError(err)
 	}
-
-	if startedTransaction(db) {
-		getOrInitInstanceSyncBuffer(db).append(events...)
-		s.metrics.SyncEventsBuffered.Add(int64(len(events)))
-		return
-	}
-
-	if isUserManagedTransaction(db) {
-		s.metrics.DroppedTotal.Add(int64(len(events)))
-		s.metrics.SyncEventsSkippedTx.Add(int64(len(events)))
-		for _, event := range events {
-			s.recordFailure(FailureEvent{
-				Source:     failureSourceTxSkip,
-				Index:      event.indexName,
-				Action:     actionSkip,
-				DocumentID: event.docID,
-				Error:      "auto sync skipped in user-managed transaction; use Syncer.Transaction",
-			})
-		}
-		s.logger.Warn("essyncer: auto sync skipped in user-managed transaction; use Syncer.Transaction",
-			zap.Int("events", len(events)),
-		)
-		return
-	}
-
-	s.flushSyncEvents(flushContext(db.Statement.Context), events)
 }
 
 func (s *Syncer) afterCommit(db *gorm.DB) {
-	if db == nil {
+	if db == nil || db.Error != nil {
 		return
 	}
-	value, ok := db.InstanceGet(instanceSyncEventsKey)
+	value, ok := db.InstanceGet(instanceOutboxPersistedCountKey)
 	if !ok {
 		return
 	}
-
-	buffer, ok := value.(*syncEventBuffer)
-	if !ok {
+	count, ok := value.(int64)
+	if !ok || count <= 0 {
 		return
 	}
-	events := buffer.snapshot()
-	if len(events) == 0 {
-		return
-	}
-
-	if db.Error != nil {
-		s.metrics.DroppedTotal.Add(int64(len(events)))
-		return
-	}
-
-	s.flushSyncEvents(flushContext(db.Statement.Context), events)
+	s.metrics.OutboxEventsPersisted.Add(count)
 }
 
 func (s *Syncer) Transaction(ctx context.Context, fn func(tx *gorm.DB) error, opts ...*sql.TxOptions) error {
@@ -179,14 +104,5 @@ func (s *Syncer) Transaction(ctx context.Context, fn func(tx *gorm.DB) error, op
 		return nil
 	}
 
-	txCtx, buffer := withSyncBuffer(ctx)
-	err := s.db.WithContext(txCtx).Transaction(func(tx *gorm.DB) error {
-		return fn(tx.WithContext(txCtx))
-	}, opts...)
-	if err != nil {
-		return err
-	}
-
-	s.flushSyncEvents(flushContext(ctx), buffer.snapshot())
-	return nil
+	return s.db.WithContext(ctx).Transaction(fn, opts...)
 }

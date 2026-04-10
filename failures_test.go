@@ -2,7 +2,10 @@ package essyncer
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -62,33 +65,48 @@ func TestFailureHook_ReceivesFailureEvent(t *testing.T) {
 	}
 }
 
-func TestCallbackFailure_RecordsFailureEvent(t *testing.T) {
+func TestRelayFailure_RecordsFailureEvent(t *testing.T) {
 	db := openBlockerTestDB(t)
-	indexer := &fakeBulkIndexer{
-		itemFailAt:     1,
-		itemFailStatus: 429,
-		itemFailReason: "too many requests",
-	}
-	s := newBlockerTestSyncer(t, db, indexer)
+	setupOutboxTable(t, db)
+	s := newBlockerTestSyncer(t, db, &fakeBulkIndexer{})
+	s.cfg.Outbox.PollInterval = 10 * time.Millisecond
+	s.es = newTestElasticsearchClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(req, http.StatusTooManyRequests, `{"error":{"reason":"too many requests"}}`), nil
+	}))
 
-	if err := s.EnableAutoSync(db); err != nil {
-		t.Fatalf("enable auto sync: %v", err)
+	row := blockerOutboxEvent{
+		Table:      "blocker_articles",
+		IndexAlias: "blocker_articles",
+		DocumentID: "1",
+		Action:     string(actionUpdate),
+		Payload:    []byte(`{"doc":{"title":"after"}}`),
+		Status:     OutboxStatusPending,
 	}
-	if err := db.Model(&blockerArticle{ID: 1}).Updates(map[string]any{"title": "after"}).Error; err != nil {
-		t.Fatalf("update article: %v", err)
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("seed outbox row: %v", err)
 	}
 
-	failures := s.RecentFailures(1)
-	if len(failures) != 1 {
-		t.Fatalf("expected 1 failure event, got %d", len(failures))
+	relayCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := s.StartOutboxRelay(relayCtx); err != nil {
+		t.Fatalf("start outbox relay: %v", err)
 	}
-	if failures[0].Source != "callback" || failures[0].Status != 429 || !failures[0].Retryable {
-		t.Fatalf("unexpected callback failure event: %#v", failures[0])
+
+	if err := waitFor(t.Context(), 2*time.Second, func() (bool, error) {
+		return len(s.RecentFailures(10)) > 0, nil
+	}); err != nil {
+		t.Fatalf("wait relay failure event: %v", err)
+	}
+
+	failures := s.RecentFailures(10)
+	if failures[0].Source != failureSourceRelay || failures[0].Status != 429 || !failures[0].Retryable {
+		t.Fatalf("unexpected relay failure event: %#v", failures[0])
 	}
 }
 
-func TestUserManagedTransactionSkip_RecordsFailureEvent(t *testing.T) {
+func TestUserManagedTransactionSkip_PersistsOutboxWithoutSkipFailure(t *testing.T) {
 	db := openBlockerTestDB(t)
+	setupOutboxTable(t, db)
 	indexer := &fakeBulkIndexer{}
 	s := newBlockerTestSyncer(t, db, indexer)
 
@@ -101,12 +119,28 @@ func TestUserManagedTransactionSkip_RecordsFailureEvent(t *testing.T) {
 		t.Fatalf("raw transaction update: %v", err)
 	}
 
-	failures := s.RecentFailures(1)
-	if len(failures) != 1 {
-		t.Fatalf("expected 1 skip event, got %d", len(failures))
+	rows := listOutboxEvents(t, db)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 outbox row after raw transaction commit, got %d", len(rows))
 	}
-	if failures[0].Source != "tx_skip" || failures[0].Action != "skip" || failures[0].DocumentID != "1" {
-		t.Fatalf("unexpected tx skip failure event: %#v", failures[0])
+	if rows[0].Action != string(actionUpdate) {
+		t.Fatalf("outbox action = %s, want %s", rows[0].Action, string(actionUpdate))
+	}
+	if rows[0].DocumentID != "1" {
+		t.Fatalf("outbox document_id = %s, want 1", rows[0].DocumentID)
+	}
+	var payload map[string]map[string]any
+	if err := json.Unmarshal(rows[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal outbox payload: %v", err)
+	}
+	if payload["doc"]["title"] != "tx skip" {
+		t.Fatalf("outbox payload doc.title = %#v, want tx skip", payload["doc"]["title"])
+	}
+
+	for _, failure := range s.RecentFailures(10) {
+		if failure.Source == failureSourceTxSkip {
+			t.Fatalf("unexpected tx_skip failure event: %#v", failure)
+		}
 	}
 }
 
@@ -135,6 +169,7 @@ func TestFullSyncAddFailure_RecordsFailureEvent(t *testing.T) {
 
 func TestGetMetrics_IncludesFailureAndFlushSummary(t *testing.T) {
 	db := openBlockerTestDB(t)
+	setupOutboxTable(t, db)
 	indexer := &fakeBulkIndexer{}
 	s := newBlockerTestSyncer(t, db, indexer)
 
@@ -147,16 +182,22 @@ func TestGetMetrics_IncludesFailureAndFlushSummary(t *testing.T) {
 		t.Fatalf("transaction commit: %v", err)
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
-		return tx.Model(&blockerArticle{ID: 1}).Updates(map[string]any{"title": "tx skip"}).Error
+		return tx.Model(&blockerArticle{ID: 1}).Updates(map[string]any{"title": "raw tx"}).Error
 	}); err != nil {
 		t.Fatalf("raw transaction update: %v", err)
 	}
+	if rows := listOutboxEvents(t, db); len(rows) == 0 {
+		t.Fatal("expected outbox rows after transactions")
+	}
 
 	metrics := s.GetMetrics()
-	if metrics.LastFlushItems != 1 || metrics.SyncEventsBuffered == 0 || metrics.SyncEventsFlushed == 0 {
-		t.Fatalf("expected flush metrics to be populated, got %#v", metrics)
+	if metrics.OutboxEventsPersisted == 0 {
+		t.Fatalf("expected outbox persistence metrics to be populated, got %#v", metrics)
 	}
-	if metrics.LastErrorSource != "tx_skip" || metrics.SyncEventsSkippedTx == 0 || metrics.FailureSamplesRetained == 0 {
-		t.Fatalf("expected failure summary to be populated, got %#v", metrics)
+	if metrics.SyncEventsBuffered != 0 || metrics.SyncEventsFlushed != 0 || metrics.LastFlushItems != 0 {
+		t.Fatalf("expected no callback-time buffer/flush metrics in outbox mode, got %#v", metrics)
+	}
+	if metrics.LastErrorSource == failureSourceTxSkip || metrics.SyncEventsSkippedTx != 0 {
+		t.Fatalf("expected no tx_skip metrics in outbox path, got %#v", metrics)
 	}
 }

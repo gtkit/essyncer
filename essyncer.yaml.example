@@ -16,7 +16,7 @@ sync:
 
   tables:
     - model: "Article"
-      index_name: "articles"
+      index_name: "articles"    # 稳定 alias 名
       mapping_file: "./mappings/articles.json"
       batch_size: 500
       auto_sync: true
@@ -24,8 +24,14 @@ sync:
       full_doc_update: false
 
     - model: "User"
-      index_name: "users"
+      index_name: "users"       # 稳定 alias 名
       batch_size: 2000
       auto_sync: true
       soft_delete_mode: "delete"
       full_doc_update: true
+
+outbox:
+  poll_interval: 2s
+  batch_size: 100
+  max_attempts: 8
+  lease_duration: 30s

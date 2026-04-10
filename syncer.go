@@ -1,10 +1,8 @@
 package essyncer
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -45,10 +43,17 @@ type Syncer struct {
 	flushState        flushSummary
 	stopped           atomic.Bool
 	newBulkIndexer    func(esutil.BulkIndexerConfig) (esutil.BulkIndexer, error)
+	outbox            *outboxStore
+	relayMu           sync.Mutex
+	relayCtx          context.Context
+	relayCancel       context.CancelFunc
+	relayWG           sync.WaitGroup
+	relayRunning      bool
 }
 
 // New 创建并启动 Syncer。
 func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
+	cfg = normalizeOutboxConfig(cfg)
 	s := &Syncer{
 		cfg:      cfg,
 		db:       db,
@@ -64,6 +69,8 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	if s.newBulkIndexer == nil {
 		s.newBulkIndexer = esutil.NewBulkIndexer
 	}
+	s.cfg = normalizeOutboxConfig(s.cfg)
+	s.outbox = newOutboxStore(s.db)
 
 	// --- 构建 ES8 客户端配置 ---
 	esCfg := elasticsearch.Config{
@@ -111,7 +118,7 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("essyncer: es info: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.IsError() {
 		return nil, fmt.Errorf("essyncer: es error: %s", res.String())
 	}
@@ -166,6 +173,22 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	return s, nil
 }
 
+func normalizeOutboxConfig(cfg Config) Config {
+	if cfg.Outbox.PollInterval <= 0 {
+		cfg.Outbox.PollInterval = 2 * time.Second
+	}
+	if cfg.Outbox.BatchSize <= 0 {
+		cfg.Outbox.BatchSize = 100
+	}
+	if cfg.Outbox.MaxAttempts <= 0 {
+		cfg.Outbox.MaxAttempts = 8
+	}
+	if cfg.Outbox.Lease <= 0 {
+		cfg.Outbox.Lease = 30 * time.Second
+	}
+	return cfg
+}
+
 func (s *Syncer) Register(model Syncable, opts ...RegisterOption) error {
 	return s.registry.register(s.db, model, s.cfg.Sync.DefaultBatchSize, opts...)
 }
@@ -216,7 +239,7 @@ func (s *Syncer) Health(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("essyncer: ping: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.IsError() {
 		return fmt.Errorf("essyncer: unhealthy: %s", res.Status())
 	}
@@ -230,88 +253,15 @@ func (s *Syncer) makeBulkIndexer(cfg esutil.BulkIndexerConfig) (esutil.BulkIndex
 	return esutil.NewBulkIndexer(cfg)
 }
 
-// enqueue 添加操作到 BulkIndexer，带 copier 深拷贝。
-func (s *Syncer) enqueue(ctx context.Context, source string, action actionType, indexName, docID string, doc any) {
-	if s.stopped.Load() {
-		return
-	}
-	s.metrics.EnqueuedTotal.Add(1)
-
-	if doc != nil {
-		if copied, err := deepCopyModel(doc); err == nil {
-			doc = copied
-		}
-	}
-
-	item := esutil.BulkIndexerItem{
-		Index:      indexName,
-		Action:     string(action),
-		DocumentID: docID,
-		OnFailure: func(_ context.Context, item esutil.BulkIndexerItem, resp esutil.BulkIndexerResponseItem, err error) {
-			s.metrics.DeadLetters.Add(1)
-			reason := resp.Error.Reason
-			if err != nil {
-				reason = err.Error()
-			}
-			s.recordFailure(FailureEvent{
-				Source:     source,
-				Index:      item.Index,
-				Action:     item.Action,
-				DocumentID: item.DocumentID,
-				Status:     resp.Status,
-				Error:      reason,
-				Retryable:  classifyRetryable(resp.Status),
-			})
-			s.logger.Error("essyncer: bulk item failed",
-				zap.String("index", item.Index),
-				zap.String("id", item.DocumentID),
-				zap.Int("status", resp.Status),
-				zap.String("error", resp.Error.Reason),
-			)
-		},
-	}
-
-	if doc != nil {
-		var data []byte
-		var marshalErr error
-
-		switch action {
-		case actionUpdate:
-			data, marshalErr = json.Marshal(map[string]any{"doc": doc})
-		default:
-			data, marshalErr = json.Marshal(doc)
-		}
-
-		if marshalErr != nil {
-			s.metrics.DroppedTotal.Add(1)
-			s.recordFailure(FailureEvent{
-				Source:     source,
-				Index:      indexName,
-				Action:     string(action),
-				DocumentID: docID,
-				Error:      marshalErr.Error(),
-			})
-			s.logger.Error("essyncer: marshal", zap.Error(marshalErr))
-			return
-		}
-		item.Body = bytes.NewReader(data)
-	}
-
-	if err := s.indexer.Add(ctx, item); err != nil {
-		s.metrics.DroppedTotal.Add(1)
-		s.recordFailure(FailureEvent{
-			Source:     source,
-			Index:      indexName,
-			Action:     string(action),
-			DocumentID: docID,
-			Error:      err.Error(),
-		})
-		s.logger.Warn("essyncer: add to indexer", zap.String("id", docID), zap.Error(err))
-	}
-}
-
 func (s *Syncer) Shutdown(ctx context.Context) error {
 	s.stopped.Store(true)
+	s.stopOutboxRelay()
+	if err := s.waitOutboxRelay(ctx); err != nil {
+		return err
+	}
+	if s.indexer == nil {
+		return nil
+	}
 	if err := s.indexer.Close(ctx); err != nil {
 		s.logger.Error("essyncer: close indexer", zap.Error(err))
 		return fmt.Errorf("essyncer: shutdown: %w", err)
@@ -327,43 +277,18 @@ func (s *Syncer) Shutdown(ctx context.Context) error {
 // --- Index 管理 ---
 
 func (s *Syncer) EnsureIndex(ctx context.Context, entry *modelEntry) error {
-	res, err := s.es.Indices.Exists([]string{entry.indexName}, s.es.Indices.Exists.WithContext(ctx))
+	state, err := s.resolveAliasState(ctx, entry.indexName)
 	if err != nil {
-		return fmt.Errorf("essyncer: check index %s: %w", entry.indexName, err)
+		return err
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode == 200 {
+	if len(state.targets) > 0 {
 		return nil
 	}
 
-	if entry.mapping != nil {
-		r, err := s.es.Indices.Create(entry.indexName,
-			s.es.Indices.Create.WithBody(strings.NewReader(string(entry.mapping))),
-			s.es.Indices.Create.WithContext(ctx),
-		)
-		if err != nil {
-			return fmt.Errorf("essyncer: create index %s: %w", entry.indexName, err)
-		}
-		defer r.Body.Close()
-		if r.IsError() {
-			return fmt.Errorf("essyncer: create index %s: %s", entry.indexName, r.String())
-		}
-	} else {
-		r, err := s.es.Indices.Create(entry.indexName, s.es.Indices.Create.WithContext(ctx))
-		if err != nil {
-			return fmt.Errorf("essyncer: create index %s: %w", entry.indexName, err)
-		}
-		defer r.Body.Close()
-		if r.IsError() {
-			return fmt.Errorf("essyncer: create index %s: %s", entry.indexName, r.String())
-		}
+	bootstrapIndex := entry.newBootstrapIndexName(time.Now().UTC())
+	if err := s.createManagedIndex(ctx, entry, bootstrapIndex, entry.indexName); err != nil {
+		return err
 	}
-
-	s.logger.Info("essyncer: index created",
-		zap.String("index", entry.indexName),
-		zap.Bool("has_mapping", entry.mapping != nil),
-	)
 	return nil
 }
 
@@ -372,9 +297,8 @@ func (s *Syncer) EnsureAllIndices(ctx context.Context) error {
 	s.registry.forEach(func(tableName string, entry *modelEntry) bool {
 		if err := s.EnsureIndex(ctx, entry); err != nil {
 			s.logger.Error("essyncer: ensure index", zap.String("table", tableName), zap.Error(err))
-			if firstErr == nil {
-				firstErr = err
-			}
+			firstErr = err
+			return false
 		}
 		return true
 	})

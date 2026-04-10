@@ -17,8 +17,9 @@ const (
 )
 
 type Config struct {
-	Elasticsearch ESConfig   `yaml:"elasticsearch"`
-	Sync          SyncConfig `yaml:"sync"`
+	Elasticsearch ESConfig     `yaml:"elasticsearch"`
+	Sync          SyncConfig   `yaml:"sync"`
+	Outbox        OutboxConfig `yaml:"outbox"`
 }
 
 type ESConfig struct {
@@ -37,6 +38,13 @@ type SyncConfig struct {
 	FlushInterval    time.Duration `yaml:"flush_interval"`
 	DefaultBatchSize int           `yaml:"default_batch_size"`
 	Tables           []TableConfig `yaml:"tables"`
+}
+
+type OutboxConfig struct {
+	PollInterval time.Duration `yaml:"poll_interval"`
+	BatchSize    int           `yaml:"batch_size"`
+	MaxAttempts  int           `yaml:"max_attempts"`
+	Lease        time.Duration `yaml:"lease_duration"`
 }
 
 type TableConfig struct {
@@ -68,6 +76,12 @@ func DefaultConfig() Config {
 			FlushBytes:       5 << 20,
 			FlushInterval:    2 * time.Second,
 			DefaultBatchSize: 1000,
+		},
+		Outbox: OutboxConfig{
+			PollInterval: 2 * time.Second,
+			BatchSize:    100,
+			MaxAttempts:  8,
+			Lease:        30 * time.Second,
 		},
 	}
 }

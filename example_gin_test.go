@@ -2,6 +2,7 @@ package essyncer_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os/signal"
 	"strconv"
@@ -46,12 +47,19 @@ func Example_ginProduction() {
 	sync, _ := essyncer.New(db, cfg, essyncer.WithLogger(zapAdapter))
 
 	// 3. 注册模型
-	sync.RegisterFromConfig(map[string]essyncer.Syncable{
+	if err := sync.RegisterFromConfig(map[string]essyncer.Syncable{
 		"Article": &Article{},
-	})
+	}); err != nil {
+		panic(err)
+	}
 
 	// 4. 启用增量同步
-	sync.EnableAutoSync(db)
+	if err := sync.EnableAutoSync(db); err != nil {
+		panic(err)
+	}
+	if err := sync.StartOutboxRelay(context.Background()); err != nil {
+		panic(err)
+	}
 
 	// 5. 可选：后台全量同步
 	go sync.FullSync(context.Background())
@@ -83,21 +91,24 @@ func Example_ginProduction() {
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
-		db.Create(&a) // → afterCreate → enqueue → BulkIndexer → ES
+		db.Create(&a) // → same transaction outbox row
 		c.JSON(201, a)
 	})
 
 	r.PUT("/articles/:id", func(c *gin.Context) {
 		id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 		var updates map[string]any
-		c.ShouldBindJSON(&updates)
-		db.Model(&Article{ID: id}).Updates(updates) // → partial update
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		db.Model(&Article{ID: id}).Updates(updates) // → same transaction outbox row
 		c.JSON(200, gin.H{"ok": true})
 	})
 
 	r.DELETE("/articles/:id", func(c *gin.Context) {
 		id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-		db.Delete(&Article{ID: id}) // → soft delete sync
+		db.Delete(&Article{ID: id}) // → same transaction outbox row
 		c.JSON(200, gin.H{"ok": true})
 	})
 
@@ -157,15 +168,23 @@ func Example_ginProduction() {
 	defer stop()
 
 	srv := &http.Server{Addr: ":8080", Handler: r}
-	go srv.ListenAndServe()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			zapAdapter.Error("listen and serve", zap.Error(err))
+		}
+	}()
 
 	<-ctx.Done()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	srv.Shutdown(shutdownCtx)     // 先关 HTTP
-	sync.Shutdown(shutdownCtx)     // 再关 ES（flush 剩余数据）
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		zapAdapter.Error("shutdown http server", zap.Error(err))
+	}
+	if err := sync.Shutdown(shutdownCtx); err != nil {
+		zapAdapter.Error("shutdown essyncer", zap.Error(err))
+	}
 }
 
 // zapLoggerAdapter 用 zap.Logger 实现 essyncer.Logger 接口。

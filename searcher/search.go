@@ -33,7 +33,6 @@ type Search[T any] struct {
 	searchAfter []types.FieldValue
 
 	highlightFields []string
-	highlight       *types.Highlight
 
 	aggs map[string]types.Aggregations
 

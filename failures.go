@@ -10,6 +10,8 @@ const defaultFailureBufferSize = 128
 const (
 	failureSourceCallback = "callback"
 	failureSourceFullSync = "fullsync"
+	failureSourceRelay    = "relay"
+	failureSourceDead     = "relay_dead"
 	failureSourceTxSkip   = "tx_skip"
 	actionSkip            = "skip"
 )
@@ -93,18 +95,6 @@ type flushSummary struct {
 	lastItems    int64
 }
 
-func (f *flushSummary) record(start time.Time, duration time.Duration, items int) {
-	if items <= 0 {
-		return
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.lastAt = start.Add(duration)
-	f.lastDuration = duration
-	f.lastItems = int64(items)
-}
-
 func (f *flushSummary) snapshot() (time.Time, time.Duration, int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -137,13 +127,6 @@ func (s *Syncer) recordFailure(event FailureEvent) {
 	if s.failureHook != nil {
 		s.failureHook(event)
 	}
-}
-
-func (s *Syncer) recordFlush(start time.Time, items int) {
-	if items <= 0 {
-		return
-	}
-	s.flushState.record(start, time.Since(start), items)
 }
 
 func classifyRetryable(status int) bool {

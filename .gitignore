@@ -4,3 +4,6 @@ docs/
 task_plan.md
 findings.md
 progress.md
+.harness
+CLAUDE.md
+AGENTS.md
