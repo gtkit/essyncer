@@ -2,6 +2,7 @@ package essyncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -118,7 +119,7 @@ func (s *Syncer) ReplayOutbox(ctx context.Context, opts OutboxReplayOptions) (in
 	case opts.AllDead:
 		query = query.Where("status = ?", OutboxStatusDead)
 	default:
-		return 0, fmt.Errorf("replay outbox rows: no ids provided and all_dead disabled")
+		return 0, errors.New("replay outbox rows: no ids provided and all_dead disabled")
 	}
 
 	if opts.Limit > 0 {
@@ -254,5 +255,8 @@ func normalizeOutboxStatuses(statuses []string) []string {
 
 func jsonUnmarshal(r io.Reader, dst any) error {
 	decoder := json.NewDecoder(r)
-	return decoder.Decode(dst)
+	if err := decoder.Decode(dst); err != nil {
+		return fmt.Errorf("decode json payload: %w", err)
+	}
+	return nil
 }

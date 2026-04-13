@@ -1,6 +1,7 @@
 package essyncer
 
 import (
+	"math"
 	"sync/atomic"
 
 	"github.com/elastic/go-elasticsearch/v8/esutil"
@@ -73,11 +74,18 @@ func (m *Metrics) snapshot(stats esutil.BulkIndexerStats) MetricsSnapshot {
 		SyncEventsFlushed:     m.SyncEventsFlushed.Load(),
 		SyncEventsSkippedTx:   m.SyncEventsSkippedTx.Load(),
 		FullSyncErrorsTotal:   m.FullSyncErrorsTotal.Load(),
-		BulkNumAdded:          int64(stats.NumAdded),
-		BulkNumFlushed:        int64(stats.NumFlushed),
-		BulkNumFailed:         int64(stats.NumFailed),
-		BulkNumIndexed:        int64(stats.NumIndexed),
-		BulkNumUpdated:        int64(stats.NumUpdated),
-		BulkNumDeleted:        int64(stats.NumDeleted),
+		BulkNumAdded:          clampUint64ToInt64(stats.NumAdded),
+		BulkNumFlushed:        clampUint64ToInt64(stats.NumFlushed),
+		BulkNumFailed:         clampUint64ToInt64(stats.NumFailed),
+		BulkNumIndexed:        clampUint64ToInt64(stats.NumIndexed),
+		BulkNumUpdated:        clampUint64ToInt64(stats.NumUpdated),
+		BulkNumDeleted:        clampUint64ToInt64(stats.NumDeleted),
 	}
+}
+
+func clampUint64ToInt64(value uint64) int64 {
+	if value > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(value)
 }

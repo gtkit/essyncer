@@ -73,7 +73,7 @@ func (r *failureRecorder) recent(limit int) []FailureEvent {
 	}
 
 	out := make([]FailureEvent, 0, limit)
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		idx := r.next - 1 - i
 		if idx < 0 {
 			idx += len(r.buf)
@@ -83,7 +83,7 @@ func (r *failureRecorder) recent(limit int) []FailureEvent {
 	return out
 }
 
-func (r *failureRecorder) summary() (FailureEvent, bool, int) {
+func (r *failureRecorder) summary() (last FailureEvent, hasLast bool, retained int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.last, r.hasLast, r.count

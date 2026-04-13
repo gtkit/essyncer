@@ -1,6 +1,8 @@
 package essyncer
 
 import (
+	"context"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -29,21 +31,24 @@ func (s *Syncer) EnableAutoSync(db *gorm.DB, models ...Syncable) error {
 	s.removeAutoSyncCallbacks(db)
 
 	if err := db.Callback().Create().Before("gorm:after_create").Register(cbAfterCreate, s.afterCreate); err != nil {
-		return err
+		return fmt.Errorf("register create callback: %w", err)
 	}
 	if err := db.Callback().Create().After("gorm:commit_or_rollback_transaction").Register(cbAfterCreateCommit, s.afterCommit); err != nil {
-		return err
+		return fmt.Errorf("register create commit callback: %w", err)
 	}
 	if err := db.Callback().Update().Before("gorm:after_update").Register(cbAfterUpdate, s.afterUpdate); err != nil {
-		return err
+		return fmt.Errorf("register update callback: %w", err)
 	}
 	if err := db.Callback().Update().After("gorm:commit_or_rollback_transaction").Register(cbAfterUpdateCommit, s.afterCommit); err != nil {
-		return err
+		return fmt.Errorf("register update commit callback: %w", err)
 	}
 	if err := db.Callback().Delete().Before("gorm:after_delete").Register(cbAfterDelete, s.afterDelete); err != nil {
-		return err
+		return fmt.Errorf("register delete callback: %w", err)
 	}
-	return db.Callback().Delete().After("gorm:commit_or_rollback_transaction").Register(cbAfterDeleteCommit, s.afterCommit)
+	if err := db.Callback().Delete().After("gorm:commit_or_rollback_transaction").Register(cbAfterDeleteCommit, s.afterCommit); err != nil {
+		return fmt.Errorf("register delete commit callback: %w", err)
+	}
+	return nil
 }
 
 func (s *Syncer) DisableAutoSync(db *gorm.DB, models ...Syncable) error {
@@ -97,6 +102,12 @@ func (s *Syncer) afterUpdate(db *gorm.DB) {
 	if entry == nil || !entry.autoSync {
 		return
 	}
+
+	changedFields := map[string]any(nil)
+	if !entry.fullDocUpdate {
+		changedFields = extractChangedFields(db)
+	}
+
 	events := make([]syncEvent, 0, len(models))
 	for _, m := range models {
 		syncable, ok := m.(Syncable)
@@ -113,8 +124,7 @@ func (s *Syncer) afterUpdate(db *gorm.DB) {
 				doc:       m,
 			})
 		} else {
-			changed := extractChangedFields(db)
-			if len(changed) == 0 {
+			if len(changedFields) == 0 {
 				events = append(events, syncEvent{
 					source:    failureSourceCallback,
 					tableName: entry.tableName,
@@ -131,7 +141,7 @@ func (s *Syncer) afterUpdate(db *gorm.DB) {
 				action:    actionUpdate,
 				indexName: entry.indexName,
 				docID:     syncable.GetID(),
-				doc:       changed,
+				doc:       changedFields,
 			})
 		}
 	}
@@ -147,6 +157,7 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 		return
 	}
 	isUnscoped := db.Statement.Unscoped
+	deletedAt := time.Now()
 
 	events := make([]syncEvent, 0, len(models))
 	for _, m := range models {
@@ -163,7 +174,7 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 					action:    actionUpdate,
 					indexName: entry.indexName,
 					docID:     syncable.GetID(),
-					doc:       map[string]any{"deleted_at": time.Now()},
+					doc:       map[string]any{"deleted_at": deletedAt},
 				})
 			case SoftDeleteModeDelete:
 				events = append(events, syncEvent{
@@ -191,42 +202,86 @@ func (s *Syncer) resolveModels(db *gorm.DB) ([]any, *modelEntry) {
 	if db.Statement == nil {
 		return nil, nil
 	}
-	var (
-		entry *modelEntry
-		ok    bool
-	)
-	if db.Statement.Schema != nil {
-		entry, ok = s.registry.get(db.Statement.Schema.Table)
-	} else if db.Statement.Table != "" {
-		entry, ok = s.registry.get(db.Statement.Table)
-	}
-	if !ok && db.Statement.Model != nil {
-		stmt := &gorm.Statement{DB: db}
-		if err := stmt.Parse(db.Statement.Model); err == nil && stmt.Schema != nil {
-			entry, ok = s.registry.get(stmt.Schema.Table)
-		}
-	}
-	if !ok {
+
+	entry := s.resolveModelEntry(db)
+	if entry == nil {
 		return nil, nil
 	}
-	dest := db.Statement.Dest
-	if dest == nil {
-		dest = db.Statement.Model
+
+	return resolveModelCandidates(db.Statement.Context, entry,
+		db.Statement.ReflectValue,
+		reflect.ValueOf(db.Statement.Model),
+		reflect.ValueOf(db.Statement.Dest),
+	), entry
+}
+
+func (s *Syncer) resolveModelEntry(db *gorm.DB) *modelEntry {
+	if db.Statement == nil {
+		return nil
 	}
-	if models := extractModels(reflect.ValueOf(dest)); len(models) > 0 {
-		return models, entry
-	}
-	if db.Statement.ReflectValue.IsValid() {
-		if models := extractModels(db.Statement.ReflectValue); len(models) > 0 {
-			return models, entry
+	if db.Statement.Schema != nil {
+		if entry, ok := s.registry.get(db.Statement.Schema.Table); ok {
+			return entry
 		}
 	}
-	if db.Statement.Model != nil {
-		if models := extractModels(reflect.ValueOf(db.Statement.Model)); len(models) > 0 {
-			return models, entry
+	if db.Statement.Table != "" {
+		if entry, ok := s.registry.get(db.Statement.Table); ok {
+			return entry
 		}
 	}
-	return nil, entry
+	if db.Statement.Model == nil {
+		return nil
+	}
+
+	stmt := &gorm.Statement{DB: db}
+	if err := stmt.Parse(db.Statement.Model); err != nil || stmt.Schema == nil {
+		return nil
+	}
+	entry, _ := s.registry.get(stmt.Schema.Table)
+	return entry
+}
+
+func resolveModelCandidates(ctx context.Context, entry *modelEntry, candidates ...reflect.Value) []any {
+	var fallback []any
+
+	for _, candidate := range candidates {
+		models := extractModels(candidate)
+		if len(models) == 0 {
+			continue
+		}
+		if fallback == nil {
+			fallback = models
+		}
+		if entry != nil && modelsHavePrimaryIdentity(ctx, entry, models) {
+			return models
+		}
+	}
+
+	return fallback
+}
+
+func modelsHavePrimaryIdentity(ctx context.Context, entry *modelEntry, models []any) bool {
+	if entry == nil || entry.schema == nil || len(entry.schema.PrimaryFields) == 0 {
+		return false
+	}
+
+	for _, model := range models {
+		value := reflect.ValueOf(model)
+		for value.Kind() == reflect.Interface || value.Kind() == reflect.Ptr {
+			if value.IsNil() {
+				return false
+			}
+			value = value.Elem()
+		}
+		for _, field := range entry.schema.PrimaryFields {
+			fieldValue, zero := field.ValueOf(ctx, value)
+			if zero || fieldValue == nil {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 func extractModels(v reflect.Value) []any {

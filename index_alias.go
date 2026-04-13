@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"slices"
 	"time"
 
@@ -41,7 +42,7 @@ func (s *Syncer) resolveAliasState(ctx context.Context, alias string) (aliasStat
 	defer func() { _ = res.Body.Close() }()
 
 	switch res.StatusCode {
-	case 200:
+	case http.StatusOK:
 		var payload map[string]struct {
 			Aliases map[string]json.RawMessage `json:"aliases"`
 		}
@@ -55,7 +56,7 @@ func (s *Syncer) resolveAliasState(ctx context.Context, alias string) (aliasStat
 		}
 		slices.Sort(state.targets)
 		return state, nil
-	case 404:
+	case http.StatusNotFound:
 		exists, err := s.indexExists(ctx, alias)
 		if err != nil {
 			return state, err
@@ -78,9 +79,9 @@ func (s *Syncer) indexExists(ctx context.Context, index string) (bool, error) {
 	defer func() { _ = res.Body.Close() }()
 
 	switch res.StatusCode {
-	case 200:
+	case http.StatusOK:
 		return true, nil
-	case 404:
+	case http.StatusNotFound:
 		return false, nil
 	default:
 		return false, fmt.Errorf("essyncer: check index %s: %s", index, res.String())
@@ -125,7 +126,7 @@ func buildIndexCreateBody(mapping json.RawMessage, aliases ...string) (io.Reader
 	payload := make(map[string]any)
 	if mapping != nil {
 		if err := json.Unmarshal(mapping, &payload); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("unmarshal index mapping: %w", err)
 		}
 	}
 	if len(aliases) > 0 {
@@ -141,7 +142,7 @@ func buildIndexCreateBody(mapping json.RawMessage, aliases ...string) (io.Reader
 
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal index body: %w", err)
 	}
 	return bytes.NewReader(data), nil
 }
@@ -191,7 +192,11 @@ func buildAliasUpdateBody(state aliasState, newIndex string) ([]byte, error) {
 		},
 	})
 
-	return json.Marshal(map[string]any{"actions": actions})
+	body, err := json.Marshal(map[string]any{"actions": actions})
+	if err != nil {
+		return nil, fmt.Errorf("marshal alias update body: %w", err)
+	}
+	return body, nil
 }
 
 func (s *Syncer) deleteIndices(ctx context.Context, indices ...string) error {

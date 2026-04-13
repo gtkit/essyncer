@@ -3,7 +3,9 @@ package essyncer
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -52,6 +54,8 @@ type Syncer struct {
 }
 
 // New 创建并启动 Syncer。
+//
+//nolint:cyclop // Constructor setup validates several independent configuration branches and keeps the exported API stable.
 func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	cfg = normalizeOutboxConfig(cfg)
 	s := &Syncer{
@@ -71,36 +75,31 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	}
 	s.cfg = normalizeOutboxConfig(s.cfg)
 	s.outbox = newOutboxStore(s.db)
+	effectiveCfg := s.cfg
 
 	// --- 构建 ES8 客户端配置 ---
 	esCfg := elasticsearch.Config{
-		Addresses:     cfg.Elasticsearch.Addresses,
-		RetryOnStatus: cfg.Elasticsearch.RetryOnStatus,
-		MaxRetries:    cfg.Elasticsearch.MaxRetries,
+		Addresses:     effectiveCfg.Elasticsearch.Addresses,
+		RetryOnStatus: effectiveCfg.Elasticsearch.RetryOnStatus,
+		MaxRetries:    effectiveCfg.Elasticsearch.MaxRetries,
 	}
-	if cfg.Elasticsearch.Username != "" {
-		esCfg.Username = cfg.Elasticsearch.Username
-		esCfg.Password = cfg.Elasticsearch.Password
+	if effectiveCfg.Elasticsearch.Username != "" {
+		esCfg.Username = effectiveCfg.Elasticsearch.Username
+		esCfg.Password = effectiveCfg.Elasticsearch.Password
 	}
 	// ES8 TLS 证书支持
-	if cfg.Elasticsearch.CACert != "" {
-		cert, err := os.ReadFile(cfg.Elasticsearch.CACert)
+	if effectiveCfg.Elasticsearch.CACert != "" {
+		cert, err := os.ReadFile(effectiveCfg.Elasticsearch.CACert)
 		if err != nil {
 			return nil, fmt.Errorf("essyncer: read ca cert: %w", err)
 		}
 		esCfg.CACert = cert
 	}
-	// 仅在显式允许时跳过 TLS 校验。
-	if esCfg.CACert == nil && cfg.Elasticsearch.AllowInsecureTLS {
-		for _, addr := range cfg.Elasticsearch.Addresses {
-			if strings.HasPrefix(addr, "https://") {
-				esCfg.Transport = &http.Transport{
-					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-				}
-				break
-			}
-		}
+	transport, err := newElasticsearchTransport(effectiveCfg.Elasticsearch)
+	if err != nil {
+		return nil, err
 	}
+	esCfg.Transport = transport
 
 	// 创建低级客户端
 	client, err := elasticsearch.NewClient(esCfg)
@@ -114,8 +113,14 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	}
 
 	// Ping 验证
-	res, err := client.Info()
+	infoCtx, cancel := newStartupContext(effectiveCfg.Elasticsearch.RequestTimeout)
+	defer cancel()
+
+	res, err := client.Info(client.Info.WithContext(infoCtx))
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("essyncer: es info timeout: %w", err)
+		}
 		return nil, fmt.Errorf("essyncer: es info: %w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
@@ -128,12 +133,12 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	s.logger.Info("essyncer: es8 connected", zap.String("status", res.Status()))
 
 	// --- 创建 BulkIndexer ---
-	workers := max(cfg.Sync.Workers, 1)
-	flushBytes := cfg.Sync.FlushBytes
+	workers := max(effectiveCfg.Sync.Workers, 1)
+	flushBytes := effectiveCfg.Sync.FlushBytes
 	if flushBytes <= 0 {
 		flushBytes = 5 << 20
 	}
-	flushInterval := cfg.Sync.FlushInterval
+	flushInterval := effectiveCfg.Sync.FlushInterval
 	if flushInterval <= 0 {
 		flushInterval = 2 * time.Second
 	}
@@ -143,7 +148,7 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 		NumWorkers:    workers,
 		FlushBytes:    flushBytes,
 		FlushInterval: flushInterval,
-		OnError: func(ctx context.Context, err error) {
+		OnError: func(_ context.Context, err error) {
 			s.recordFailure(FailureEvent{
 				Source: failureSourceCallback,
 				Error:  err.Error(),
@@ -157,7 +162,7 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	s.indexer = indexer
 
 	// 校验 mapping 文件
-	for _, tc := range cfg.Sync.Tables {
+	for _, tc := range effectiveCfg.Sync.Tables {
 		if tc.MappingFile != "" {
 			if _, verr := LoadMappingFromFile(tc.MappingFile); verr != nil {
 				return nil, fmt.Errorf("essyncer: validate mapping %s: %w", tc.Model, verr)
@@ -171,6 +176,45 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 		zap.Duration("flush_interval", flushInterval),
 	)
 	return s, nil
+}
+
+func newElasticsearchTransport(cfg ESConfig) (*http.Transport, error) {
+	timeout := cfg.RequestTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("essyncer: unexpected default transport type %T", http.DefaultTransport)
+	}
+	transport := baseTransport.Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.TLSHandshakeTimeout = timeout
+	transport.ResponseHeaderTimeout = timeout
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.AllowInsecureTLS {
+		for _, addr := range cfg.Addresses {
+			if strings.HasPrefix(addr, "https://") {
+				tlsConfig.InsecureSkipVerify = true
+				break
+			}
+		}
+	}
+	transport.TLSClientConfig = tlsConfig
+
+	return transport, nil
+}
+
+func newStartupContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func normalizeOutboxConfig(cfg Config) Config {
@@ -194,7 +238,7 @@ func (s *Syncer) ensureOutboxStore() error {
 		return nil
 	}
 	if s.db == nil {
-		return fmt.Errorf("essyncer: nil db")
+		return errors.New("essyncer: nil db")
 	}
 	s.outbox = newOutboxStore(s.db)
 	return nil
@@ -244,7 +288,7 @@ func (s *Syncer) GetMetrics() MetricsSnapshot {
 
 func (s *Syncer) Health(ctx context.Context) error {
 	if s.stopped.Load() {
-		return fmt.Errorf("essyncer: stopped")
+		return errors.New("essyncer: stopped")
 	}
 	res, err := s.es.Ping(s.es.Ping.WithContext(ctx))
 	if err != nil {
@@ -261,7 +305,11 @@ func (s *Syncer) makeBulkIndexer(cfg esutil.BulkIndexerConfig) (esutil.BulkIndex
 	if s.newBulkIndexer != nil {
 		return s.newBulkIndexer(cfg)
 	}
-	return esutil.NewBulkIndexer(cfg)
+	indexer, err := esutil.NewBulkIndexer(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("essyncer: new bulk indexer: %w", err)
+	}
+	return indexer, nil
 }
 
 func (s *Syncer) Shutdown(ctx context.Context) error {
@@ -297,10 +345,7 @@ func (s *Syncer) EnsureIndex(ctx context.Context, entry *modelEntry) error {
 	}
 
 	bootstrapIndex := entry.newBootstrapIndexName(time.Now().UTC())
-	if err := s.createManagedIndex(ctx, entry, bootstrapIndex, entry.indexName); err != nil {
-		return err
-	}
-	return nil
+	return s.createManagedIndex(ctx, entry, bootstrapIndex, entry.indexName)
 }
 
 func (s *Syncer) EnsureAllIndices(ctx context.Context) error {

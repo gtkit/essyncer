@@ -153,7 +153,7 @@ func TestFullSyncAddFailure_RecordsFailureEvent(t *testing.T) {
 		t.Fatal("expected registered model entry")
 	}
 
-	_, err := s.fullSyncTable(context.Background(), entry)
+	_, err := s.fullSyncTable(t.Context(), entry)
 	if err == nil {
 		t.Fatal("expected full sync error")
 	}
@@ -176,7 +176,7 @@ func TestGetMetrics_IncludesFailureAndFlushSummary(t *testing.T) {
 	if err := s.EnableAutoSync(db); err != nil {
 		t.Fatalf("enable auto sync: %v", err)
 	}
-	if err := s.Transaction(context.Background(), func(tx *gorm.DB) error {
+	if err := s.Transaction(t.Context(), func(tx *gorm.DB) error {
 		return tx.Model(&blockerArticle{ID: 1}).Updates(map[string]any{"title": "committed"}).Error
 	}); err != nil {
 		t.Fatalf("transaction commit: %v", err)

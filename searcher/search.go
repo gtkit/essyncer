@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strconv"
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/typedapi/core/search"
@@ -176,9 +178,13 @@ func (s *Search[T]) Do(ctx context.Context) (*SearchResult[T], error) {
 			return s.doSearch(ctx)
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("searcher: singleflight: %w", err)
 		}
-		return v.(*SearchResult[T]), nil
+		result, ok := v.(*SearchResult[T])
+		if !ok {
+			return nil, fmt.Errorf("searcher: singleflight result type %T does not match %s", v, reflect.TypeFor[SearchResult[T]]())
+		}
+		return result, nil
 	}
 	return s.doSearch(ctx)
 }
@@ -245,7 +251,7 @@ func (s *Search[T]) buildQuery() *types.Query {
 		boolQ.Filter = s.filter
 	}
 	if s.minShouldMatch != nil {
-		msm := fmt.Sprintf("%d", *s.minShouldMatch)
+		msm := strconv.Itoa(*s.minShouldMatch)
 		boolQ.MinimumShouldMatch = &msm
 	}
 
@@ -311,7 +317,10 @@ func (s *Search[T]) buildRequest() *search.Request {
 // cacheKey 生成查询的唯一标识，用于 singleflight 去重。
 func (s *Search[T]) cacheKey() string {
 	req := s.buildRequest()
-	data, _ := json.Marshal(req)
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Sprintf("%p:%s:%s:marshal-error", s.client, reflect.TypeFor[T](), s.index)
+	}
 	h := sha256.Sum256(data)
-	return fmt.Sprintf("%p:%s:%x", s.client, s.index, h[:8])
+	return fmt.Sprintf("%p:%s:%s:%x", s.client, reflect.TypeFor[T](), s.index, h[:8])
 }

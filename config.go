@@ -23,13 +23,14 @@ type Config struct {
 }
 
 type ESConfig struct {
-	Addresses        []string `yaml:"addresses"`
-	Username         string   `yaml:"username"`
-	Password         string   `yaml:"password"`
-	MaxRetries       int      `yaml:"max_retries"`
-	RetryOnStatus    []int    `yaml:"retry_on_status"`
-	CACert           string   `yaml:"ca_cert"`            // ES8 TLS 证书路径（可选）
-	AllowInsecureTLS bool     `yaml:"allow_insecure_tls"` // 仅开发调试时显式启用
+	Addresses        []string      `yaml:"addresses"`
+	Username         string        `yaml:"username"`
+	Password         string        `yaml:"password"`
+	MaxRetries       int           `yaml:"max_retries"`
+	RetryOnStatus    []int         `yaml:"retry_on_status"`
+	RequestTimeout   time.Duration `yaml:"request_timeout"`
+	CACert           string        `yaml:"ca_cert"`            // ES8 TLS 证书路径（可选）
+	AllowInsecureTLS bool          `yaml:"allow_insecure_tls"` // 仅开发调试时显式启用
 }
 
 type SyncConfig struct {
@@ -67,9 +68,10 @@ func (tc TableConfig) IsAutoSync() bool {
 func DefaultConfig() Config {
 	return Config{
 		Elasticsearch: ESConfig{
-			Addresses:     []string{"http://localhost:9200"},
-			MaxRetries:    3,
-			RetryOnStatus: []int{502, 503, 504, 429},
+			Addresses:      []string{"http://localhost:9200"},
+			MaxRetries:     3,
+			RetryOnStatus:  []int{502, 503, 504, 429},
+			RequestTimeout: 5 * time.Second,
 		},
 		Sync: SyncConfig{
 			Workers:          4,

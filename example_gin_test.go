@@ -19,18 +19,18 @@ import (
 // --- 模型定义 ---
 
 type Article struct {
-	ID        int64          `gorm:"primaryKey" json:"id"`
-	Title     string         `gorm:"size:255" json:"title"`
-	Content   string         `gorm:"type:text" json:"content"`
-	Category  string         `gorm:"size:50" json:"category"`
-	Status    string         `gorm:"size:20;default:draft" json:"status"`
-	CreatedAt time.Time      `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitzero"`
+	ID        int64          `json:"id"                  gorm:"primaryKey"`
+	Title     string         `json:"title"               gorm:"size:255"`
+	Content   string         `json:"content"             gorm:"type:text"`
+	Category  string         `json:"category"            gorm:"size:50"`
+	Status    string         `json:"status"              gorm:"size:20;default:draft"`
+	CreatedAt time.Time      `json:"created_at"          gorm:"autoCreateTime"`
+	UpdatedAt time.Time      `json:"updated_at"          gorm:"autoUpdateTime"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitzero" gorm:"index"`
 }
 
 func (Article) TableName() string { return "articles" }
-func (a *Article) GetID() string  { return strconv.FormatInt(a.ID, 10) }
+func (a Article) GetID() string   { return strconv.FormatInt(a.ID, 10) }
 
 // Example_ginProduction 完整的 Gin 生产集成示例。
 func Example_ginProduction() {

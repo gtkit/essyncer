@@ -86,7 +86,8 @@ func (r *modelRegistry) get(tableName string) (*modelEntry, bool) {
 	if !ok {
 		return nil, false
 	}
-	return v.(*modelEntry), true
+	entry, ok := v.(*modelEntry)
+	return entry, ok
 }
 
 func (r *modelRegistry) getByModel(db *gorm.DB, model Syncable) (*modelEntry, bool) {
@@ -100,7 +101,9 @@ func (r *modelRegistry) getByModel(db *gorm.DB, model Syncable) (*modelEntry, bo
 func (r *modelRegistry) allEntries() []*modelEntry {
 	var entries []*modelEntry
 	r.entries.Range(func(_, value any) bool {
-		entries = append(entries, value.(*modelEntry))
+		if entry, ok := value.(*modelEntry); ok {
+			entries = append(entries, entry)
+		}
 		return true
 	})
 	return entries
@@ -108,13 +111,23 @@ func (r *modelRegistry) allEntries() []*modelEntry {
 
 func (r *modelRegistry) forEach(fn func(string, *modelEntry) bool) {
 	r.entries.Range(func(key, value any) bool {
-		return fn(key.(string), value.(*modelEntry))
+		tableName, ok := key.(string)
+		if !ok {
+			return true
+		}
+		entry, ok := value.(*modelEntry)
+		if !ok {
+			return true
+		}
+		return fn(tableName, entry)
 	})
 }
 
 func (r *modelRegistry) setAutoSyncAll(enabled bool) {
 	r.entries.Range(func(_, value any) bool {
-		value.(*modelEntry).autoSync = enabled
+		if entry, ok := value.(*modelEntry); ok {
+			entry.autoSync = enabled
+		}
 		return true
 	})
 }
@@ -198,7 +211,11 @@ func (e *modelEntry) fullSyncCursor(startID int64) (FullSyncScanCursor, error) {
 	if e.fullSyncScan == nil {
 		return nil, fmt.Errorf("essyncer: full sync table %s has no scan strategy", e.tableName)
 	}
-	return e.fullSyncScan.Prepare(e.fullSyncInfo(), startID)
+	cursor, err := e.fullSyncScan.Prepare(e.fullSyncInfo(), startID)
+	if err != nil {
+		return nil, fmt.Errorf("essyncer: prepare full sync cursor for %s: %w", e.tableName, err)
+	}
+	return cursor, nil
 }
 
 func (k *fullSyncKey) valueOf(ctx context.Context, v reflect.Value) (any, error) {
@@ -285,11 +302,11 @@ func deepCopyModel(src any) (any, error) {
 	// 非指针非 map，JSON 降级
 	data, err := json.Marshal(src)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("essyncer: marshal fallback copy: %w", err)
 	}
 	var copied map[string]any
 	if err := json.Unmarshal(data, &copied); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("essyncer: unmarshal fallback copy: %w", err)
 	}
 	return copied, nil
 }

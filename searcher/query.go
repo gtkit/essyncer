@@ -35,7 +35,7 @@ func MultiMatch(text string, fields ...string) types.Query {
 	}
 }
 
-func Term(field string, value string) types.Query {
+func Term(field, value string) types.Query {
 	return types.Query{
 		Term: map[string]types.TermQuery{
 			field: {Value: value},
@@ -84,10 +84,26 @@ type NumRangeBuilder struct {
 	q     types.NumberRangeQuery
 }
 
-func (b *NumRangeBuilder) Gt(v float64) *NumRangeBuilder  { f := types.Float64(v); b.q.Gt = &f; return b }
-func (b *NumRangeBuilder) Gte(v float64) *NumRangeBuilder { f := types.Float64(v); b.q.Gte = &f; return b }
-func (b *NumRangeBuilder) Lt(v float64) *NumRangeBuilder  { f := types.Float64(v); b.q.Lt = &f; return b }
-func (b *NumRangeBuilder) Lte(v float64) *NumRangeBuilder { f := types.Float64(v); b.q.Lte = &f; return b }
+func (b *NumRangeBuilder) Gt(v float64) *NumRangeBuilder {
+	f := types.Float64(v)
+	b.q.Gt = &f
+	return b
+}
+func (b *NumRangeBuilder) Gte(v float64) *NumRangeBuilder {
+	f := types.Float64(v)
+	b.q.Gte = &f
+	return b
+}
+func (b *NumRangeBuilder) Lt(v float64) *NumRangeBuilder {
+	f := types.Float64(v)
+	b.q.Lt = &f
+	return b
+}
+func (b *NumRangeBuilder) Lte(v float64) *NumRangeBuilder {
+	f := types.Float64(v)
+	b.q.Lte = &f
+	return b
+}
 
 func (b *NumRangeBuilder) Build() types.Query {
 	return types.Query{

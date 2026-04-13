@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v8/esutil"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type FullSyncResult struct {
@@ -105,7 +107,7 @@ func (s *Syncer) ensureIndices(ctx context.Context, entries []*modelEntry) (*mod
 func (s *Syncer) FullSyncTable(ctx context.Context, model Syncable) (int64, error) {
 	entry, ok := s.registry.getByModel(s.db, model)
 	if !ok {
-		return 0, fmt.Errorf("essyncer: model not registered")
+		return 0, errors.New("essyncer: model not registered")
 	}
 	return s.fullSyncTableAt(ctx, entry, 0)
 }
@@ -137,14 +139,14 @@ func (s *Syncer) fullSyncTableAt(ctx context.Context, entry *modelEntry, startID
 	}
 
 	rebuildIndex := entry.newRebuildIndexName(time.Now().UTC())
-	if err := s.createManagedIndex(ctx, entry, rebuildIndex); err != nil {
+	if createErr := s.createManagedIndex(ctx, entry, rebuildIndex); createErr != nil {
 		s.recordFailure(FailureEvent{
 			Source: failureSourceFullSync,
 			Index:  entry.indexName,
 			Action: string(actionIndex),
-			Error:  err.Error(),
+			Error:  createErr.Error(),
 		})
-		return 0, err
+		return 0, createErr
 	}
 
 	cursor, err := entry.fullSyncCursor(startID)
@@ -219,28 +221,17 @@ func (s *Syncer) fullSyncFrom(ctx context.Context, entry *modelEntry, targetInde
 		select {
 		case <-ctx.Done():
 			_ = indexer.Close(ctx)
-			return totalSynced, ctx.Err()
+			return totalSynced, fmt.Errorf("essyncer: full sync canceled for %s: %w", entry.tableName, ctx.Err())
 		default:
 		}
 
 		slicePtr := newModelSlice(entry)
-
-		query := s.db.WithContext(ctx)
-		if entry.hasSoftDelete && entry.softDeleteMode == SoftDeleteModeUpdate {
-			query = query.Unscoped()
-		}
-
 		beforeCheckpoint := cursor.Checkpoint()
-		result := cursor.Scope(query.Table(entry.tableName), batchSize).Find(slicePtr)
+		result := cursor.Scope(s.fullSyncQuery(ctx, entry).Table(entry.tableName), batchSize).Find(slicePtr)
 
 		if result.Error != nil {
 			_ = indexer.Close(ctx)
-			s.recordFailure(FailureEvent{
-				Source: failureSourceFullSync,
-				Index:  entry.indexName,
-				Action: string(actionIndex),
-				Error:  result.Error.Error(),
-			})
+			s.recordFullSyncFailure(entry, "", result.Error)
 			return totalSynced, fmt.Errorf("essyncer: query %s: %w", entry.tableName, result.Error)
 		}
 
@@ -250,71 +241,22 @@ func (s *Syncer) fullSyncFrom(ctx context.Context, entry *modelEntry, targetInde
 			break
 		}
 
-		for i := range rowCount {
-			elem := sliceVal.Index(i).Addr().Interface()
-			syncable, ok := elem.(Syncable)
-			if !ok {
-				_ = indexer.Close(ctx)
-				s.recordFailure(FailureEvent{
-					Source: failureSourceFullSync,
-					Index:  entry.indexName,
-					Action: string(actionIndex),
-					Error:  fmt.Sprintf("model %s does not implement Syncable", entry.tableName),
-				})
-				return totalSynced, fmt.Errorf("essyncer: model %s does not implement Syncable", entry.tableName)
-			}
-			data, err := json.Marshal(elem)
-			if err != nil {
-				_ = indexer.Close(ctx)
-				s.recordFailure(FailureEvent{
-					Source:     failureSourceFullSync,
-					Index:      entry.indexName,
-					Action:     string(actionIndex),
-					DocumentID: syncable.GetID(),
-					Error:      err.Error(),
-				})
-				return totalSynced, fmt.Errorf("essyncer: marshal %s id %s: %w", entry.tableName, syncable.GetID(), err)
-			}
-			if err := indexer.Add(ctx, esutil.BulkIndexerItem{
-				Index:      targetIndex,
-				Action:     "index",
-				DocumentID: syncable.GetID(),
-				Body:       bytes.NewReader(data),
-			}); err != nil {
-				_ = indexer.Close(ctx)
-				s.recordFailure(FailureEvent{
-					Source:     failureSourceFullSync,
-					Index:      entry.indexName,
-					Action:     string(actionIndex),
-					DocumentID: syncable.GetID(),
-					Error:      err.Error(),
-				})
-				return totalSynced, fmt.Errorf("essyncer: add to full sync indexer %s id %s: %w", entry.tableName, syncable.GetID(), err)
-			}
-			totalSynced++
-			s.metrics.FullSyncDocs.Add(1)
-			if err := cursor.Advance(ctx, elem); err != nil {
-				_ = indexer.Close(ctx)
-				s.recordFailure(FailureEvent{
-					Source:     failureSourceFullSync,
-					Index:      entry.indexName,
-					Action:     string(actionIndex),
-					DocumentID: syncable.GetID(),
-					Error:      err.Error(),
-				})
-				return totalSynced, fmt.Errorf("essyncer: advance full sync cursor %s id %s: %w", entry.tableName, syncable.GetID(), err)
-			}
+		syncedCount, err := s.syncFullSyncBatch(ctx, entry, targetIndex, cursor, indexer, sliceVal)
+		totalSynced += syncedCount
+		if err != nil {
+			_ = indexer.Close(ctx)
+			return totalSynced, err
 		}
 		if rowCount == batchSize && reflect.DeepEqual(beforeCheckpoint, cursor.Checkpoint()) {
 			_ = indexer.Close(ctx)
-			err := fmt.Errorf("essyncer: full sync scan strategy for %s did not advance", entry.tableName)
+			stallErr := fmt.Errorf("essyncer: full sync scan strategy for %s did not advance", entry.tableName)
 			s.recordFailure(FailureEvent{
 				Source: failureSourceFullSync,
 				Index:  entry.indexName,
 				Action: string(actionIndex),
-				Error:  err.Error(),
+				Error:  stallErr.Error(),
 			})
-			return totalSynced, err
+			return totalSynced, stallErr
 		}
 
 		if rowCount < batchSize {
@@ -331,7 +273,75 @@ func (s *Syncer) fullSyncFrom(ctx context.Context, entry *modelEntry, targetInde
 func (s *Syncer) FullSyncWithCheckpoint(ctx context.Context, model Syncable, startID int64) (int64, error) {
 	entry, ok := s.registry.getByModel(s.db, model)
 	if !ok {
-		return 0, fmt.Errorf("essyncer: model not registered")
+		return 0, errors.New("essyncer: model not registered")
 	}
 	return s.fullSyncTableAt(ctx, entry, startID)
+}
+
+func (s *Syncer) fullSyncQuery(ctx context.Context, entry *modelEntry) *gorm.DB {
+	query := s.db.WithContext(ctx)
+	if entry.hasSoftDelete && entry.softDeleteMode == SoftDeleteModeUpdate {
+		return query.Unscoped()
+	}
+	return query
+}
+
+func (s *Syncer) recordFullSyncFailure(entry *modelEntry, documentID string, err error) {
+	if err == nil {
+		return
+	}
+	s.recordFailure(FailureEvent{
+		Source:     failureSourceFullSync,
+		Index:      entry.indexName,
+		Action:     string(actionIndex),
+		DocumentID: documentID,
+		Error:      err.Error(),
+	})
+}
+
+func (s *Syncer) syncFullSyncBatch(
+	ctx context.Context,
+	entry *modelEntry,
+	targetIndex string,
+	cursor FullSyncScanCursor,
+	indexer esutil.BulkIndexer,
+	sliceVal reflect.Value,
+) (int64, error) {
+	var syncedCount int64
+
+	for i := range sliceVal.Len() {
+		elem := sliceVal.Index(i).Addr().Interface()
+		syncable, ok := elem.(Syncable)
+		if !ok {
+			err := fmt.Errorf("essyncer: model %s does not implement Syncable", entry.tableName)
+			s.recordFullSyncFailure(entry, "", err)
+			return syncedCount, err
+		}
+
+		data, err := json.Marshal(elem)
+		if err != nil {
+			s.recordFullSyncFailure(entry, syncable.GetID(), err)
+			return syncedCount, fmt.Errorf("essyncer: marshal %s id %s: %w", entry.tableName, syncable.GetID(), err)
+		}
+
+		if err := indexer.Add(ctx, esutil.BulkIndexerItem{
+			Index:      targetIndex,
+			Action:     "index",
+			DocumentID: syncable.GetID(),
+			Body:       bytes.NewReader(data),
+		}); err != nil {
+			s.recordFullSyncFailure(entry, syncable.GetID(), err)
+			return syncedCount, fmt.Errorf("essyncer: add to full sync indexer %s id %s: %w", entry.tableName, syncable.GetID(), err)
+		}
+
+		syncedCount++
+		s.metrics.FullSyncDocs.Add(1)
+
+		if err := cursor.Advance(ctx, elem); err != nil {
+			s.recordFullSyncFailure(entry, syncable.GetID(), err)
+			return syncedCount, fmt.Errorf("essyncer: advance full sync cursor %s id %s: %w", entry.tableName, syncable.GetID(), err)
+		}
+	}
+
+	return syncedCount, nil
 }

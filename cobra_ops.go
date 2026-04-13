@@ -1,6 +1,7 @@
 package essyncer
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -72,7 +73,7 @@ func newFullSyncCommand(opts CobraOpsOptions) *cobra.Command {
 
 			if checkpoint != 0 {
 				if len(models) != 1 {
-					return fmt.Errorf("checkpoint full sync requires exactly one model")
+					return errors.New("checkpoint full sync requires exactly one model")
 				}
 				total, err := s.FullSyncWithCheckpoint(cmd.Context(), models[0], checkpoint)
 				if err != nil {
@@ -129,7 +130,7 @@ func newDocEnqueueCommand(opts CobraOpsOptions, use, short string, action action
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: short,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := syncerFromOptions(opts)
 			if err != nil {
 				return err
@@ -181,7 +182,7 @@ func newDocDeleteCommand(opts CobraOpsOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete",
 		Short: "Enqueue a delete action for a single document",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := syncerFromOptions(opts)
 			if err != nil {
 				return err
@@ -191,7 +192,7 @@ func newDocDeleteCommand(opts CobraOpsOptions) *cobra.Command {
 				return err
 			}
 			if pk == "" && docID == "" {
-				return fmt.Errorf("either --pk or --id is required")
+				return errors.New("either --pk or --id is required")
 			}
 			if err := s.EnqueueDocumentDelete(cmd.Context(), model, pk, docID, unscoped); err != nil {
 				return err
@@ -227,7 +228,7 @@ func newDocGetCommand(opts CobraOpsOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "Inspect DB, ES, and outbox state for a single document",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := syncerFromOptions(opts)
 			if err != nil {
 				return err
@@ -264,7 +265,7 @@ func newOutboxListCommand(opts CobraOpsOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List outbox rows",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := syncerFromOptions(opts)
 			if err != nil {
 				return err
@@ -299,7 +300,7 @@ func newOutboxCleanupCommand(opts CobraOpsOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cleanup",
 		Short: "Delete matching outbox rows",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := syncerFromOptions(opts)
 			if err != nil {
 				return err
@@ -330,7 +331,7 @@ func newOutboxReplayCommand(opts CobraOpsOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Reset dead outbox rows back to pending",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := syncerFromOptions(opts)
 			if err != nil {
 				return err
@@ -368,7 +369,7 @@ func newRelayDrainCommand(opts CobraOpsOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "drain",
 		Short: "Process outbox rows until empty or batch limit",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := syncerFromOptions(opts)
 			if err != nil {
 				return err
@@ -445,7 +446,7 @@ func newReconcileCommand(opts CobraOpsOptions) *cobra.Command {
 
 func syncerFromOptions(opts CobraOpsOptions) (*Syncer, error) {
 	if opts.Syncer == nil {
-		return nil, fmt.Errorf("essyncer cobra ops: Syncer is required")
+		return nil, errors.New("essyncer cobra ops: Syncer is required")
 	}
 	return opts.Syncer, nil
 }
@@ -463,7 +464,7 @@ func resolveCommandModels(registry map[string]Syncable, args []string) ([]Syncab
 		return nil, nil
 	}
 	if len(registry) == 0 {
-		return nil, fmt.Errorf("model registry is required when selecting models by name")
+		return nil, errors.New("model registry is required when selecting models by name")
 	}
 	models := make([]Syncable, 0, len(args))
 	for _, arg := range args {

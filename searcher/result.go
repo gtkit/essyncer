@@ -43,9 +43,14 @@ func parseTypedSearchResult[T any](resp *search.Response) (*SearchResult[T], err
 
 	result.Items = make([]T, 0, len(resp.Hits.Hits))
 	for _, hit := range resp.Hits.Hits {
+		docID := "<unknown>"
+		if hit.Id_ != nil {
+			docID = *hit.Id_
+		}
+
 		var item T
 		if err := json.Unmarshal(hit.Source_, &item); err != nil {
-			return nil, fmt.Errorf("searcher: unmarshal doc %s: %w", *hit.Id_, err)
+			return nil, fmt.Errorf("searcher: unmarshal doc %s: %w", docID, err)
 		}
 		result.Items = append(result.Items, item)
 

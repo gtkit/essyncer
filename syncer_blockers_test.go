@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,38 +22,38 @@ import (
 )
 
 type blockerArticle struct {
-	ID        int64          `gorm:"primaryKey" json:"id"`
+	ID        int64          `json:"id"                  gorm:"primaryKey"`
 	Title     string         `json:"title"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitzero"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitzero" gorm:"index"`
 }
 
 func (blockerArticle) TableName() string { return "blocker_articles" }
-func (a *blockerArticle) GetID() string  { return strconv.FormatInt(a.ID, 10) }
+func (a blockerArticle) GetID() string   { return strconv.FormatInt(a.ID, 10) }
 
 type blockerUUIDArticle struct {
-	DocID string `gorm:"column:doc_id;primaryKey" json:"doc_id"`
+	DocID string `json:"doc_id" gorm:"column:doc_id;primaryKey"`
 	Title string `json:"title"`
 }
 
 func (blockerUUIDArticle) TableName() string { return "blocker_uuid_articles" }
-func (a *blockerUUIDArticle) GetID() string  { return a.DocID }
+func (a blockerUUIDArticle) GetID() string   { return a.DocID }
 
 type blockerOrder struct {
-	OrderID int64  `gorm:"column:order_id;primaryKey" json:"order_id"`
+	OrderID int64  `json:"order_id" gorm:"column:order_id;primaryKey"`
 	Title   string `json:"title"`
 }
 
 func (blockerOrder) TableName() string { return "blocker_orders" }
-func (o *blockerOrder) GetID() string  { return strconv.FormatInt(o.OrderID, 10) }
+func (o blockerOrder) GetID() string   { return strconv.FormatInt(o.OrderID, 10) }
 
 type blockerCompositeDoc struct {
-	TenantID int64  `gorm:"primaryKey" json:"tenant_id"`
-	DocID    int64  `gorm:"primaryKey" json:"doc_id"`
+	TenantID int64  `json:"tenant_id" gorm:"primaryKey"`
+	DocID    int64  `json:"doc_id"    gorm:"primaryKey"`
 	Title    string `json:"title"`
 }
 
 func (blockerCompositeDoc) TableName() string { return "blocker_composite_docs" }
-func (d *blockerCompositeDoc) GetID() string {
+func (d blockerCompositeDoc) GetID() string {
 	return strconv.FormatInt(d.TenantID, 10) + ":" + strconv.FormatInt(d.DocID, 10)
 }
 
@@ -104,7 +105,7 @@ func (f *fakeBulkIndexer) ensureDefaultIndex(index string) {
 	f.defaultIndex = firstNonEmpty(f.defaultIndex, index)
 }
 
-func (f *fakeBulkIndexer) Add(_ context.Context, item esutil.BulkIndexerItem) error {
+func (f *fakeBulkIndexer) Add(ctx context.Context, item esutil.BulkIndexerItem) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -138,7 +139,7 @@ func (f *fakeBulkIndexer) Add(_ context.Context, item esutil.BulkIndexerItem) er
 				DocumentID: item.DocumentID,
 			}
 			resp.Error.Reason = f.itemFailReason
-			item.OnFailure(context.Background(), item, resp, nil)
+			item.OnFailure(ctx, item, resp, nil)
 		}
 	}
 	return nil
@@ -310,6 +311,53 @@ func TestDefaultConfig_DisablesInsecureTLS(t *testing.T) {
 	}
 }
 
+func TestNew_UsesConfiguredRequestTimeout(t *testing.T) {
+	tests := []struct {
+		name            string
+		responseDelay   time.Duration
+		requestTimeout  time.Duration
+		wantErrContains string
+		wantWithin      time.Duration
+	}{
+		{
+			name:            "info request times out before a stalled elasticsearch node responds",
+			responseDelay:   300 * time.Millisecond,
+			requestTimeout:  50 * time.Millisecond,
+			wantErrContains: "timeout",
+			wantWithin:      200 * time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				time.Sleep(tt.responseDelay)
+				w.Header().Set("X-Elastic-Product", "Elasticsearch")
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			defer srv.Close()
+
+			cfg := DefaultConfig()
+			cfg.Elasticsearch.Addresses = []string{srv.URL}
+			cfg.Elasticsearch.RequestTimeout = tt.requestTimeout
+
+			startedAt := time.Now()
+			_, err := New(openBlockerTestDB(t), cfg)
+			elapsed := time.Since(startedAt)
+
+			if err == nil {
+				t.Fatal("expected syncer construction to fail on elasticsearch timeout")
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), tt.wantErrContains) {
+				t.Fatalf("constructor error = %q, want containing %q", err.Error(), tt.wantErrContains)
+			}
+			if elapsed > tt.wantWithin {
+				t.Fatalf("constructor elapsed = %s, want <= %s", elapsed, tt.wantWithin)
+			}
+		})
+	}
+}
+
 func TestAfterUpdate_MapUpdatesPersistOutboxAndAvoidImmediateESWrites(t *testing.T) {
 	db := openBlockerTestDB(t)
 	setupOutboxTable(t, db)
@@ -344,6 +392,32 @@ func TestAfterUpdate_MapUpdatesPersistOutboxAndAvoidImmediateESWrites(t *testing
 	}
 	if payload["doc"]["title"] != "after" {
 		t.Fatalf("expected partial update payload, got %#v", payload)
+	}
+}
+
+func TestAfterUpdate_StructUpdatesKeepModelPrimaryKey(t *testing.T) {
+	db := openBlockerTestDB(t)
+	setupOutboxTable(t, db)
+	indexer := &fakeBulkIndexer{}
+	s := newBlockerTestSyncer(t, db, indexer)
+
+	if err := s.EnableAutoSync(db); err != nil {
+		t.Fatalf("enable auto sync: %v", err)
+	}
+
+	if err := db.Model(&blockerArticle{ID: 1}).Select("Title").Updates(&blockerArticle{Title: "struct-update"}).Error; err != nil {
+		t.Fatalf("struct update article: %v", err)
+	}
+
+	rows := listOutboxEvents(t, db)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 outbox row after struct update, got %d", len(rows))
+	}
+	if rows[0].DocumentID != "1" {
+		t.Fatalf("expected document id 1 for struct update, got %s", rows[0].DocumentID)
+	}
+	if !strings.Contains(string(rows[0].Payload), "struct-update") {
+		t.Fatalf("expected payload to include updated title, got %s", string(rows[0].Payload))
 	}
 }
 
@@ -387,7 +461,7 @@ func TestSyncerTransaction_CommitsBufferedEvents(t *testing.T) {
 		t.Fatalf("enable auto sync: %v", err)
 	}
 
-	if err := s.Transaction(context.Background(), func(tx *gorm.DB) error {
+	if err := s.Transaction(t.Context(), func(tx *gorm.DB) error {
 		return tx.Model(&blockerArticle{ID: 1}).Updates(map[string]any{"title": "tx commit"}).Error
 	}); err != nil {
 		t.Fatalf("transaction commit: %v", err)
@@ -422,7 +496,7 @@ func TestSyncerTransaction_RollbackDropsBufferedEvents(t *testing.T) {
 		t.Fatalf("enable auto sync: %v", err)
 	}
 
-	err := s.Transaction(context.Background(), func(tx *gorm.DB) error {
+	err := s.Transaction(t.Context(), func(tx *gorm.DB) error {
 		if err := tx.Model(&blockerArticle{ID: 1}).Updates(map[string]any{"title": "tx rollback"}).Error; err != nil {
 			return err
 		}
@@ -519,7 +593,7 @@ func TestFullSyncTable_CountsOnlySuccessfullyQueuedDocs(t *testing.T) {
 		t.Fatal("expected registered model entry")
 	}
 
-	total, err := s.fullSyncTable(context.Background(), entry)
+	total, err := s.fullSyncTable(t.Context(), entry)
 	if err == nil {
 		t.Fatal("expected full sync error when bulk add fails")
 	}

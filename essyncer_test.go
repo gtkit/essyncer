@@ -2,32 +2,33 @@ package essyncer
 
 import (
 	"encoding/json"
-	"gorm.io/gorm"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // --- 测试模型 ---
 
 type testArticle struct {
-	ID        int64          `gorm:"primaryKey" json:"id"`
+	ID        int64          `json:"id"                  gorm:"primaryKey"`
 	Title     string         `json:"title"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitzero"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitzero" gorm:"index"`
 }
 
 func (testArticle) TableName() string { return "articles" }
-func (a *testArticle) GetID() string  { return "1" }
+func (testArticle) GetID() string     { return "1" }
 
 type testUser struct {
-	ID   int64  `gorm:"primaryKey" json:"id"`
+	ID   int64  `json:"id"   gorm:"primaryKey"`
 	Name string `json:"name"`
 }
 
 func (testUser) TableName() string { return "users" }
-func (u *testUser) GetID() string  { return "1" }
+func (testUser) GetID() string     { return "1" }
 
 // --- Config ---
 
@@ -209,9 +210,12 @@ func TestDeepCopyModel_Struct(t *testing.T) {
 
 func TestLoadMappingFromFile_ValidJSON(t *testing.T) {
 	tmp := t.TempDir() + "/m.json"
-	data, _ := json.Marshal(map[string]any{"mappings": map[string]any{}})
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		t.Fatalf("write valid mapping: %v", err)
+	data, err := json.Marshal(map[string]any{"mappings": map[string]any{}})
+	if err != nil {
+		t.Fatalf("marshal valid mapping: %v", err)
+	}
+	if writeErr := os.WriteFile(tmp, data, 0o644); writeErr != nil {
+		t.Fatalf("write valid mapping: %v", writeErr)
 	}
 
 	result, err := LoadMappingFromFile(tmp)

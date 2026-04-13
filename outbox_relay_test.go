@@ -106,7 +106,7 @@ func TestOutboxRelay_StatusTransitions(t *testing.T) {
 
 			relayCtx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			if err := startOutboxRelayByReflection(s, relayCtx); err != nil {
+			if err := startOutboxRelayByReflection(relayCtx, s); err != nil {
 				t.Fatalf("start outbox relay: %v", err)
 			}
 
@@ -202,10 +202,10 @@ func TestOutboxRelay_LeasePreventsDuplicateProcessing(t *testing.T) {
 			ctx2, cancel2 := context.WithCancel(t.Context())
 			defer cancel2()
 
-			if err := startOutboxRelayByReflection(s1, ctx1); err != nil {
+			if err := startOutboxRelayByReflection(ctx1, s1); err != nil {
 				t.Fatalf("start first relay: %v", err)
 			}
-			if err := startOutboxRelayByReflection(s2, ctx2); err != nil {
+			if err := startOutboxRelayByReflection(ctx2, s2); err != nil {
 				t.Fatalf("start second relay: %v", err)
 			}
 
@@ -267,7 +267,7 @@ func TestOutboxRelay_ShutdownWaitsForInFlightBatch(t *testing.T) {
 
 			relayCtx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			if err := startOutboxRelayByReflection(s, relayCtx); err != nil {
+			if err := startOutboxRelayByReflection(relayCtx, s); err != nil {
 				t.Fatalf("start outbox relay: %v", err)
 			}
 
@@ -279,7 +279,7 @@ func TestOutboxRelay_ShutdownWaitsForInFlightBatch(t *testing.T) {
 
 			done := make(chan error, 1)
 			go func() {
-				done <- s.Shutdown(context.Background())
+				done <- s.Shutdown(t.Context())
 			}()
 
 			select {
@@ -354,7 +354,7 @@ func TestOutboxPayload_MatchesRelayRequestBody(t *testing.T) {
 
 			relayCtx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			if err := startOutboxRelayByReflection(s, relayCtx); err != nil {
+			if err := startOutboxRelayByReflection(relayCtx, s); err != nil {
 				t.Fatalf("start outbox relay: %v", err)
 			}
 
@@ -426,7 +426,7 @@ func TestOutboxPayload_RequiresGTKitJSONV0210InOutboxPath(t *testing.T) {
 	}
 }
 
-func startOutboxRelayByReflection(s *Syncer, ctx context.Context) error {
+func startOutboxRelayByReflection(ctx context.Context, s *Syncer) error {
 	method := reflect.ValueOf(s).MethodByName("StartOutboxRelay")
 	if !method.IsValid() {
 		return errors.New("StartOutboxRelay is not implemented")

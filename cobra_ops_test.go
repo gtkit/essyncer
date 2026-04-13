@@ -2,7 +2,6 @@ package essyncer
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -27,7 +26,7 @@ func TestOpsCommand_FullSync(t *testing.T) {
 	cmd.SetErr(&out)
 	cmd.SetArgs([]string{"full-sync", "User"})
 
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute full-sync command: %v", err)
 	}
 	if !strings.Contains(out.String(), "blocker_users synced=1") {
@@ -60,7 +59,7 @@ func TestOpsCommand_DocCreateUpdateDeleteGet(t *testing.T) {
 	createCmd.SetOut(&createOut)
 	createCmd.SetErr(&createOut)
 	createCmd.SetArgs([]string{"doc", "create", "--model", "Article", "--pk", "1"})
-	if err := createCmd.ExecuteContext(context.Background()); err != nil {
+	if err := createCmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute doc create command: %v", err)
 	}
 	rows := listOutboxEvents(t, db)
@@ -68,7 +67,7 @@ func TestOpsCommand_DocCreateUpdateDeleteGet(t *testing.T) {
 		t.Fatalf("expected index outbox row after doc create, got %#v", rows)
 	}
 
-	if _, err := s.CleanupOutbox(context.Background(), OutboxCleanupOptions{Statuses: []string{OutboxStatusPending}}); err != nil {
+	if _, err := s.CleanupOutbox(t.Context(), OutboxCleanupOptions{Statuses: []string{OutboxStatusPending}}); err != nil {
 		t.Fatalf("cleanup outbox rows: %v", err)
 	}
 
@@ -77,7 +76,7 @@ func TestOpsCommand_DocCreateUpdateDeleteGet(t *testing.T) {
 	updateCmd.SetOut(&updateOut)
 	updateCmd.SetErr(&updateOut)
 	updateCmd.SetArgs([]string{"doc", "update", "--model", "Article", "--pk", "1"})
-	if err := updateCmd.ExecuteContext(context.Background()); err != nil {
+	if err := updateCmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute doc update command: %v", err)
 	}
 	rows = listOutboxEvents(t, db)
@@ -85,7 +84,7 @@ func TestOpsCommand_DocCreateUpdateDeleteGet(t *testing.T) {
 		t.Fatalf("expected update outbox row after doc update, got %#v", rows)
 	}
 
-	if _, err := s.CleanupOutbox(context.Background(), OutboxCleanupOptions{Statuses: []string{OutboxStatusPending}}); err != nil {
+	if _, err := s.CleanupOutbox(t.Context(), OutboxCleanupOptions{Statuses: []string{OutboxStatusPending}}); err != nil {
 		t.Fatalf("cleanup outbox rows: %v", err)
 	}
 
@@ -94,7 +93,7 @@ func TestOpsCommand_DocCreateUpdateDeleteGet(t *testing.T) {
 	deleteCmd.SetOut(&deleteOut)
 	deleteCmd.SetErr(&deleteOut)
 	deleteCmd.SetArgs([]string{"doc", "delete", "--model", "Article", "--id", "1"})
-	if err := deleteCmd.ExecuteContext(context.Background()); err != nil {
+	if err := deleteCmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute doc delete command: %v", err)
 	}
 	rows = listOutboxEvents(t, db)
@@ -107,7 +106,7 @@ func TestOpsCommand_DocCreateUpdateDeleteGet(t *testing.T) {
 	getCmd.SetOut(&getOut)
 	getCmd.SetErr(&getOut)
 	getCmd.SetArgs([]string{"doc", "get", "--model", "Article", "--pk", "1"})
-	if err := getCmd.ExecuteContext(context.Background()); err != nil {
+	if err := getCmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute doc get command: %v", err)
 	}
 	if !strings.Contains(getOut.String(), "db_found=true") || !strings.Contains(getOut.String(), "es_found=true") {
@@ -139,7 +138,7 @@ func TestOpsCommand_OutboxListCleanupReplay(t *testing.T) {
 	listCmd.SetOut(&listOut)
 	listCmd.SetErr(&listOut)
 	listCmd.SetArgs([]string{"outbox", "list", "--status", "dead"})
-	if err := listCmd.ExecuteContext(context.Background()); err != nil {
+	if err := listCmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute outbox list command: %v", err)
 	}
 	if !strings.Contains(listOut.String(), "status=dead") {
@@ -151,7 +150,7 @@ func TestOpsCommand_OutboxListCleanupReplay(t *testing.T) {
 	replayCmd.SetOut(&replayOut)
 	replayCmd.SetErr(&replayOut)
 	replayCmd.SetArgs([]string{"outbox", "replay", "--all-dead"})
-	if err := replayCmd.ExecuteContext(context.Background()); err != nil {
+	if err := replayCmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute outbox replay command: %v", err)
 	}
 	if !strings.Contains(replayOut.String(), "replayed=1") {
@@ -172,7 +171,7 @@ func TestOpsCommand_OutboxListCleanupReplay(t *testing.T) {
 	cleanupCmd.SetOut(&cleanupOut)
 	cleanupCmd.SetErr(&cleanupOut)
 	cleanupCmd.SetArgs([]string{"outbox", "cleanup", "--status", "dead"})
-	if err := cleanupCmd.ExecuteContext(context.Background()); err != nil {
+	if err := cleanupCmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute outbox cleanup command: %v", err)
 	}
 	if !strings.Contains(cleanupOut.String(), "deleted=1") {
@@ -208,7 +207,7 @@ func TestOpsCommand_RelayDrain(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetArgs([]string{"relay", "drain", "--max-batches", "1"})
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute relay drain command: %v", err)
 	}
 	if !strings.Contains(out.String(), "processed=1") {
@@ -247,7 +246,7 @@ func TestOpsCommand_ReconcileCounts(t *testing.T) {
 	cmd.SetErr(&out)
 	cmd.SetArgs([]string{"reconcile", "User"})
 
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute reconcile command: %v", err)
 	}
 	if !strings.Contains(out.String(), "match=true") {
@@ -288,7 +287,7 @@ func TestOpsCommand_OutboxCleanupOlderThan(t *testing.T) {
 
 	cmd := NewOpsCommand(CobraOpsOptions{Syncer: s})
 	cmd.SetArgs([]string{"outbox", "cleanup", "--status", "dead", "--older-than", "1h"})
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("execute cleanup older-than command: %v", err)
 	}
 

@@ -2,7 +2,9 @@ package essyncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
@@ -19,10 +21,10 @@ type DocumentInspectResult struct {
 	Alias      string `json:"alias"`
 	DocumentID string `json:"document_id"`
 
-	DBFound      bool   `json:"db_found"`
-	ESFound      bool   `json:"es_found"`
-	OutboxPending int64 `json:"outbox_pending"`
-	OutboxDead    int64 `json:"outbox_dead"`
+	DBFound       bool   `json:"db_found"`
+	ESFound       bool   `json:"es_found"`
+	OutboxPending int64  `json:"outbox_pending"`
+	OutboxDead    int64  `json:"outbox_dead"`
 	LastDeadError string `json:"last_dead_error"`
 }
 
@@ -43,7 +45,7 @@ func (s *Syncer) EnqueueDocumentDelete(ctx context.Context, model Syncable, prim
 	docID := strings.TrimSpace(documentID)
 	if docID == "" {
 		if strings.TrimSpace(primaryKey) == "" {
-			return fmt.Errorf("enqueue document delete: primary key or document id is required")
+			return errors.New("enqueue document delete: primary key or document id is required")
 		}
 		loaded, err := s.loadSyncableByPrimaryKey(ctx, modelProto, strings.TrimSpace(primaryKey), unscoped)
 		if err != nil {
@@ -75,44 +77,24 @@ func (s *Syncer) InspectDocument(ctx context.Context, model Syncable, primaryKey
 
 	docID := strings.TrimSpace(documentID)
 	if strings.TrimSpace(primaryKey) != "" {
-		loaded, err := s.loadSyncableByPrimaryKey(ctx, modelProto, strings.TrimSpace(primaryKey), unscoped)
-		if err == nil {
+		loaded, loadErr := s.loadSyncableByPrimaryKey(ctx, modelProto, strings.TrimSpace(primaryKey), unscoped)
+		if loadErr == nil {
 			result.DBFound = true
 			docID = loaded.GetID()
-		} else if err != gorm.ErrRecordNotFound {
-			return nil, err
+		} else if !errors.Is(loadErr, gorm.ErrRecordNotFound) {
+			return nil, loadErr
 		}
 	}
 	if docID == "" {
-		return nil, fmt.Errorf("inspect document: primary key or document id is required")
+		return nil, errors.New("inspect document: primary key or document id is required")
 	}
 	result.DocumentID = docID
 
-	resp, err := s.es.Get(entry.indexName, docID, s.es.Get.WithContext(ctx))
-	if err != nil {
-		return nil, fmt.Errorf("inspect document es get: %w", err)
-	}
-	func() {
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode == 404 {
-			return
-		}
-		if resp.IsError() {
-			err = fmt.Errorf("inspect document es get: %s", resp.Status())
-			return
-		}
-		var payload struct {
-			Found bool `json:"found"`
-		}
-		if decodeErr := json.NewDecoder(resp.Body).Decode(&payload); decodeErr != nil {
-			err = fmt.Errorf("inspect document decode es response: %w", decodeErr)
-			return
-		}
-		result.ESFound = payload.Found
-	}()
+	esFound, err := s.inspectESDocument(ctx, entry.indexName, docID)
 	if err != nil {
 		return nil, err
 	}
+	result.ESFound = esFound
 
 	if findErr := s.db.WithContext(ctx).Model(&OutboxEvent{}).
 		Where("index_alias = ? AND document_id = ? AND status = ?", entry.indexName, docID, OutboxStatusPending).
@@ -124,18 +106,52 @@ func (s *Syncer) InspectDocument(ctx context.Context, model Syncable, primaryKey
 		Count(&result.OutboxDead).Error; findErr != nil {
 		return nil, fmt.Errorf("inspect document dead outbox: %w", findErr)
 	}
-	var dead OutboxEvent
-	if err := s.db.WithContext(ctx).Model(&OutboxEvent{}).
-		Where("index_alias = ? AND document_id = ? AND status = ?", entry.indexName, docID, OutboxStatusDead).
-		Order("id DESC").
-		Limit(1).
-		Take(&dead).Error; err == nil {
-		result.LastDeadError = dead.LastError
-	} else if err != nil && err != gorm.ErrRecordNotFound {
-		return nil, fmt.Errorf("inspect document dead outbox detail: %w", err)
+	lastDeadError, err := s.lookupLatestDeadOutboxError(ctx, entry.indexName, docID)
+	if err != nil {
+		return nil, err
 	}
+	result.LastDeadError = lastDeadError
 
 	return result, nil
+}
+
+func (s *Syncer) inspectESDocument(ctx context.Context, indexName, docID string) (bool, error) {
+	resp, err := s.es.Get(indexName, docID, s.es.Get.WithContext(ctx))
+	if err != nil {
+		return false, fmt.Errorf("inspect document es get: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.IsError() {
+		return false, fmt.Errorf("inspect document es get: %s", resp.Status())
+	}
+
+	var payload struct {
+		Found bool `json:"found"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return false, fmt.Errorf("inspect document decode es response: %w", err)
+	}
+	return payload.Found, nil
+}
+
+func (s *Syncer) lookupLatestDeadOutboxError(ctx context.Context, indexName, docID string) (string, error) {
+	var dead OutboxEvent
+	deadErr := s.db.WithContext(ctx).Model(&OutboxEvent{}).
+		Where("index_alias = ? AND document_id = ? AND status = ?", indexName, docID, OutboxStatusDead).
+		Order("id DESC").
+		Limit(1).
+		Take(&dead).Error
+	if deadErr == nil {
+		return dead.LastError, nil
+	}
+	if errors.Is(deadErr, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	return "", fmt.Errorf("inspect document dead outbox detail: %w", deadErr)
 }
 
 func (s *Syncer) enqueueDocumentFromDB(ctx context.Context, model Syncable, primaryKey string, action actionType, unscoped bool) error {
@@ -160,7 +176,7 @@ func (s *Syncer) enqueueDocumentFromDB(ctx context.Context, model Syncable, prim
 
 func (s *Syncer) requireModelEntry(model Syncable) (*modelEntry, Syncable, error) {
 	if model == nil {
-		return nil, nil, fmt.Errorf("model is required")
+		return nil, nil, errors.New("model is required")
 	}
 	entry, ok := s.registry.getByModel(s.db, model)
 	if !ok {
@@ -200,11 +216,11 @@ func (s *Syncer) loadSyncableByPrimaryKey(ctx context.Context, model Syncable, r
 
 func parsePrimaryKeyValue(field *schema.Field, raw string) (any, error) {
 	if field == nil {
-		return nil, fmt.Errorf("missing primary key field")
+		return nil, errors.New("missing primary key field")
 	}
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return nil, fmt.Errorf("empty primary key")
+		return nil, errors.New("empty primary key")
 	}
 	switch field.IndirectFieldType.Kind() {
 	case reflect.String:
@@ -212,13 +228,13 @@ func parsePrimaryKeyValue(field *schema.Field, raw string) (any, error) {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		n, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parse int primary key %q: %w", value, err)
 		}
 		return n, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		n, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parse uint primary key %q: %w", value, err)
 		}
 		return n, nil
 	default:

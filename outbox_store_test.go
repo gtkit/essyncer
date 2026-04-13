@@ -206,11 +206,11 @@ func TestOutboxStore_MarkUpdates_RequireMatchingLease(t *testing.T) {
 			}
 
 			newLease := time.Now().UTC().Add(time.Minute)
-			if err := db.WithContext(t.Context()).
+			if updateErr := db.WithContext(t.Context()).
 				Model(&OutboxEvent{}).
 				Where("id = ?", claimed[0].ID).
-				Updates(map[string]any{"leased_until": newLease}).Error; err != nil {
-				t.Fatalf("simulate lease handoff: %v", err)
+				Updates(map[string]any{"leased_until": newLease}).Error; updateErr != nil {
+				t.Fatalf("simulate lease handoff: %v", updateErr)
 			}
 
 			err = tt.update(t.Context(), store, claimed[0])

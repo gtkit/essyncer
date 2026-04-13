@@ -101,5 +101,8 @@ func (s *Syncer) Transaction(ctx context.Context, fn func(tx *gorm.DB) error, op
 		return nil
 	}
 
-	return s.db.WithContext(ctx).Transaction(fn, opts...)
+	if err := s.db.WithContext(ctx).Transaction(fn, opts...); err != nil {
+		return fmt.Errorf("essyncer: transaction: %w", err)
+	}
+	return nil
 }

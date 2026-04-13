@@ -1,7 +1,6 @@
 package essyncer
 
 import (
-	"context"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,12 +10,12 @@ import (
 )
 
 type blockerUser struct {
-	ID   int64  `gorm:"primaryKey" json:"id"`
+	ID   int64  `json:"id"   gorm:"primaryKey"`
 	Name string `json:"name"`
 }
 
 func (blockerUser) TableName() string { return "blocker_users" }
-func (u *blockerUser) GetID() string  { return strconv.FormatInt(u.ID, 10) }
+func (u blockerUser) GetID() string   { return strconv.FormatInt(u.ID, 10) }
 
 func openScopedTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -96,7 +95,7 @@ func TestFullSync_SelectedModelsOnly(t *testing.T) {
 		t.Fatalf("register blocker user: %v", err)
 	}
 
-	results := s.FullSync(context.Background(), &blockerUser{})
+	results := s.FullSync(t.Context(), &blockerUser{})
 	if len(results) != 1 {
 		t.Fatalf("expected one full sync result, got %d", len(results))
 	}
@@ -116,7 +115,7 @@ func TestFullSync_AllModelsWhenNoModelsSpecified(t *testing.T) {
 		t.Fatalf("register blocker user: %v", err)
 	}
 
-	results := s.FullSync(context.Background())
+	results := s.FullSync(t.Context())
 	if len(results) != 2 {
 		t.Fatalf("expected two full sync results, got %d", len(results))
 	}

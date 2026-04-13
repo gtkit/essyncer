@@ -2,6 +2,7 @@ package essyncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -34,19 +35,19 @@ func (s *outboxStore) insertFromEvents(ctx context.Context, tx *gorm.DB, events 
 		return nil
 	}
 	if tx == nil {
-		return fmt.Errorf("insert outbox events: nil transaction db")
+		return errors.New("insert outbox events: nil transaction db")
 	}
 
 	rows := make([]OutboxEvent, 0, len(events))
 	for _, event := range events {
 		if event.TableName == "" {
-			return fmt.Errorf("insert outbox events: empty table name")
+			return errors.New("insert outbox events: empty table name")
 		}
 		if event.IndexAlias == "" {
-			return fmt.Errorf("insert outbox events: empty index alias")
+			return errors.New("insert outbox events: empty index alias")
 		}
 		if event.DocumentID == "" {
-			return fmt.Errorf("insert outbox events: empty document id")
+			return errors.New("insert outbox events: empty document id")
 		}
 		payload, err := marshalOutboxPayload(event.Action, event.Doc)
 		if err != nil {
@@ -94,7 +95,7 @@ func (s *outboxStore) claimPending(ctx context.Context, batchSize int, leaseDura
 		return nil, nil
 	}
 	if leaseDuration <= 0 {
-		return nil, fmt.Errorf("claim pending outbox rows: invalid lease duration")
+		return nil, errors.New("claim pending outbox rows: invalid lease duration")
 	}
 	now := s.now().UTC()
 	leaseUntil := now.Add(leaseDuration)
@@ -219,10 +220,10 @@ func (s *outboxStore) markDead(ctx context.Context, row OutboxEvent, reason erro
 
 func rowLease(row OutboxEvent) (time.Time, error) {
 	if row.ID <= 0 {
-		return time.Time{}, fmt.Errorf("invalid row id")
+		return time.Time{}, errors.New("invalid row id")
 	}
 	if row.LeasedUntil == nil {
-		return time.Time{}, fmt.Errorf("missing lease")
+		return time.Time{}, errors.New("missing lease")
 	}
 	return row.LeasedUntil.UTC(), nil
 }
@@ -237,7 +238,7 @@ func (s *outboxStore) updateClaimedRow(ctx context.Context, id int64, leaseUntil
 		return fmt.Errorf("update claimed row: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("lease mismatch or row not claimed")
+		return errors.New("lease mismatch or row not claimed")
 	}
 	return nil
 }

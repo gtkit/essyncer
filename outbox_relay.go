@@ -3,6 +3,7 @@ package essyncer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -25,23 +26,22 @@ func (s *Syncer) StartOutboxRelay(ctx context.Context) error {
 	defer s.relayMu.Unlock()
 
 	if s.stopped.Load() {
-		return fmt.Errorf("essyncer: stopped")
+		return errors.New("essyncer: stopped")
 	}
 	if s.relayRunning {
 		return nil
 	}
+	if ctx == nil {
+		return errors.New("essyncer: start outbox relay: nil context")
+	}
 	if s.db == nil {
-		return fmt.Errorf("essyncer: start outbox relay: nil db")
+		return errors.New("essyncer: start outbox relay: nil db")
 	}
 	if err := s.ensureOutboxStore(); err != nil {
 		return fmt.Errorf("essyncer: start outbox relay: %w", err)
 	}
 
-	relayCtx := ctx
-	if relayCtx == nil {
-		relayCtx = context.Background()
-	}
-	relayCtx, cancel := context.WithCancel(relayCtx)
+	relayCtx, cancel := context.WithCancel(ctx)
 	s.relayCtx = relayCtx
 	s.relayCancel = cancel
 	s.relayRunning = true
@@ -71,9 +71,8 @@ func (s *Syncer) stopOutboxRelay() {
 }
 
 func (s *Syncer) waitOutboxRelay(ctx context.Context) error {
-	waitCtx := ctx
-	if waitCtx == nil {
-		waitCtx = context.Background()
+	if ctx == nil {
+		return errors.New("essyncer: shutdown relay: nil context")
 	}
 
 	done := make(chan struct{})
@@ -85,8 +84,8 @@ func (s *Syncer) waitOutboxRelay(ctx context.Context) error {
 	select {
 	case <-done:
 		return nil
-	case <-waitCtx.Done():
-		return fmt.Errorf("essyncer: shutdown relay: %w", waitCtx.Err())
+	case <-ctx.Done():
+		return fmt.Errorf("essyncer: shutdown relay: %w", ctx.Err())
 	}
 }
 
@@ -128,7 +127,7 @@ func (s *Syncer) runOutboxBatch(ctx context.Context) (outboxBatchResult, error) 
 	rows, err := s.outbox.claimPending(ctx, s.cfg.Outbox.BatchSize, s.cfg.Outbox.Lease)
 	if err != nil {
 		if ctx.Err() != nil {
-			return batch, nil
+			return batch, fmt.Errorf("relay claim pending: %w", ctx.Err())
 		}
 		return batch, fmt.Errorf("relay claim pending: %w", err)
 	}
@@ -278,7 +277,7 @@ func (s *Syncer) sendOutboxRow(ctx context.Context, row OutboxEvent) (int, error
 		return 0, fmt.Errorf("unsupported outbox action %q", row.Action)
 	}
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("send outbox row %s %s: %w", row.Action, row.DocumentID, err)
 	}
 	defer func() { _ = res.Body.Close() }()
 

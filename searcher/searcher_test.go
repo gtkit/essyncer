@@ -1,10 +1,17 @@
 package searcher
 
 import (
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
+	"golang.org/x/sync/singleflight"
 )
 
 func TestMatch(t *testing.T) {
@@ -214,6 +221,116 @@ func TestSearch_CacheKeyIncludesClientIdentity(t *testing.T) {
 	}
 }
 
+type searcherTestDoc struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type searcherAltDoc struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func TestSearch_Do_WithSingleflightSeparatesGenericTypes(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "same request on same client keeps generic result types isolated"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sfGroup = singleflight.Group{}
+
+			var calls atomic.Int32
+			started := make(chan struct{}, 1)
+			release := make(chan struct{})
+			client := newTestTypedClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if calls.Add(1) == 1 {
+					select {
+					case started <- struct{}{}:
+					default:
+					}
+					<-release
+				}
+				return searchJSONResponse(req, http.StatusOK, `{
+					"hits": {
+						"total": {"value": 1, "relation": "eq"},
+						"hits": [
+							{"_id": "1", "_source": {"id": "1", "name": "alice"}}
+						]
+					}
+				}`), nil
+			}))
+
+			type resultA struct {
+				value *SearchResult[searcherTestDoc]
+				err   error
+			}
+
+			firstDone := make(chan resultA, 1)
+
+			go func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						firstDone <- resultA{err: errors.New("unexpected panic in first search")}
+					}
+				}()
+				value, err := NewSearch[searcherTestDoc](client, "articles").
+					Must(MatchAll()).
+					WithSingleflight().
+					Do(t.Context())
+				firstDone <- resultA{value: value, err: err}
+			}()
+
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("expected first search request to start")
+			}
+
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				close(release)
+			}()
+
+			var (
+				secondValue *SearchResult[searcherAltDoc]
+				secondErr   error
+			)
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						secondErr = errors.New("panic: generic singleflight collision")
+					}
+				}()
+				secondValue, secondErr = NewSearch[searcherAltDoc](client, "articles").
+					Must(MatchAll()).
+					WithSingleflight().
+					Do(t.Context())
+			}()
+
+			first := <-firstDone
+
+			if first.err != nil {
+				t.Fatalf("first search error: %v", first.err)
+			}
+			if secondErr != nil {
+				t.Fatalf("second search error: %v", secondErr)
+			}
+			if first.value == nil || len(first.value.Items) != 1 || first.value.Items[0].Name != "alice" {
+				t.Fatalf("unexpected first search result: %#v", first.value)
+			}
+			if secondValue == nil || len(secondValue.Items) != 1 || secondValue.Items[0].Name != "alice" {
+				t.Fatalf("unexpected second search result: %#v", secondValue)
+			}
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("expected 2 elasticsearch calls for different generic result types, got %d", got)
+			}
+		})
+	}
+}
+
 // --- Agg Builders ---
 
 func TestTermsAgg(t *testing.T) {
@@ -237,5 +354,36 @@ func TestDateHistogramAgg(t *testing.T) {
 	}
 }
 
-// prevent unused import
+// Prevent unused import.
 var _ types.Query
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func newTestTypedClient(t *testing.T, transport http.RoundTripper) *elasticsearch.TypedClient {
+	t.Helper()
+
+	client, err := elasticsearch.NewTypedClient(elasticsearch.Config{
+		Addresses: []string{"http://example.test"},
+		Transport: transport,
+	})
+	if err != nil {
+		t.Fatalf("create fake typed elasticsearch client: %v", err)
+	}
+	return client
+}
+
+func searchJSONResponse(req *http.Request, statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Header: http.Header{
+			"Content-Type":      []string{"application/json"},
+			"X-Elastic-Product": []string{"Elasticsearch"},
+		},
+		Body:    io.NopCloser(strings.NewReader(body)),
+		Request: req,
+	}
+}
