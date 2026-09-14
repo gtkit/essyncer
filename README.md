@@ -104,24 +104,16 @@ rootCmd.AddCommand(essyncer.NewOpsCommand(essyncer.CobraOpsOptions{
 
 ### 当前能做什么
 
-当前这组 cobra 命令**可以手动触发数据同步相关运维动作**，并且已经支持单条文档级别的手工修复。
+这组 cobra 命令是**运维修复入口**，覆盖单条文档级别的手工修复：
 
-- **能做**
-  - 手动对单条文档做“创建 / 更新 / 删除 / 查询”修复：
-    - `doc create`
-    - `doc update`
-    - `doc delete`
-    - `doc get`
-  - 手动执行全量同步：`full-sync`
-  - 手动重放 dead outbox：`outbox replay`
-  - 手动排空 pending outbox：`relay drain`
-  - 手动对账并按模型修复：`reconcile --repair`
-  - 查看 / 清理 outbox：`outbox list`、`outbox cleanup`
-- **仍然不建议做**
-  - 不建议把 cobra 命令当成日常业务写流入口
-  - 不建议通过 CLI 绕过 DB 真源，手工拼任意 ES 文档内容
+- 手动对单条文档做“创建 / 更新 / 删除 / 查询”修复：`doc create`、`doc update`、`doc delete`、`doc get`
+- 手动执行全量同步：`full-sync`
+- 手动重放 dead outbox：`outbox replay`
+- 手动排空 pending outbox：`relay drain`
+- 手动对账并按模型修复：`reconcile --repair`
+- 查看 / 清理 outbox：`outbox list`、`outbox cleanup`
 
-所以，**当前 cobra 命令已经具备“单条 CRUD 运维修复入口”，但它仍然是运维修复工具，不是业务主链路**。
+日常增删改查的同步由 `EnableAutoSync(...)` + `StartOutboxRelay(ctx)` + 正常业务写库事务承担，命令行用于其之外的运维动作。
 
 ### 适用场景
 
@@ -129,18 +121,6 @@ rootCmd.AddCommand(essyncer.NewOpsCommand(essyncer.CobraOpsOptions{
 - outbox 积压，需要手动 drain 一次
 - dead 行需要人工 replay
 - DB 和 ES 数量不一致，先对账，再按模型 repair
-
-### 不适用场景
-
-- 日常线上增删改查同步
-- 业务侧对单条记录做即时人工补写
-- 把 cobra 命令当成正常服务主链路
-
-这些场景应该继续走：
-
-- `EnableAutoSync(...)`
-- `StartOutboxRelay(ctx)`
-- 正常业务写库事务
 
 ### 已提供的运维子命令
 
@@ -431,6 +411,50 @@ app essyncer reconcile Article --repair
 3. 如果 ES 文档存在但字段脏了，执行 `doc update --model Article --pk 1 --drain`
 4. 如果 ES 有脏残留文档，执行 `doc delete --model Article --id 1 --drain`
 
+## outbox_events 建表
+
+`outbox_events` 由接入方自行通过 migration 创建，库不会在生产路径里自动建表。MySQL 8 参考 DDL：
+
+```sql
+CREATE TABLE outbox_events (
+    id            BIGINT       NOT NULL AUTO_INCREMENT,
+    table_name    VARCHAR(128) NOT NULL,
+    index_alias   VARCHAR(128) NOT NULL,
+    document_id   VARCHAR(191) NOT NULL,
+    action        VARCHAR(32)  NOT NULL,
+    payload       JSON         NOT NULL,
+    status        VARCHAR(32)  NOT NULL,
+    attempts      INT          NOT NULL DEFAULT 0,
+    next_retry_at DATETIME     NULL,
+    last_error    TEXT,
+    leased_until  DATETIME     NULL,
+    lease_token   VARCHAR(32),
+    created_at    DATETIME     NOT NULL,
+    sent_at       DATETIME     NULL,
+    PRIMARY KEY (id),
+    KEY idx_status (status),
+    KEY idx_next_retry (next_retry_at),
+    KEY idx_leased_until (leased_until)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+`lease_token` 是 relay 认领行时写入的租约凭证，后续 `sent` / 重试 / `dead` 的写回都按它做 fencing 判定。时间列可以用任意精度（`DATETIME`、`DATETIME(3)`、`DATETIME(6)`）：fencing 不依赖时间列的存储精度。
+
+## 自动同步覆盖的写法
+
+`EnableAutoSync` 在 GORM callback 里捕获变更，因此覆盖范围是**经过 GORM 且能在 callback 中拿到主键的写操作**：
+
+| 写法 | 行为 |
+|------|------|
+| `db.Create(&article)` / 批量 `Create(&[]Article{...})` | 自增主键回填后入 outbox |
+| `db.Save(&article)` | 入 outbox |
+| `db.Model(&article).Update(...)` / `.Updates(...)`（`article` 已加载主键） | 入 outbox，增量模式下只带变更字段 |
+| `db.Delete(&article)` | 按软删除配置入 outbox |
+
+`Updates(map[string]any{...})` 的 key 可以写 Go 字段名或数据库列名，两者都会归一化成列名后再发给 ES。
+
+当 WHERE 条件里不含主键时（如 `db.Model(&Article{}).Where("status = ?", 1).Update(...)`），callback 只能看到零值 model，无法确定受影响的行。这类写入会被**跳过**：数据库写照常成功，但不产生 ES 同步事件，同时计入 `sync_events_skipped_unidentified` 指标、写一条 `unidentified_rows` 失败样本并打 warn 日志。补齐方式是按主键写、或在批量写后对相关模型执行 `FullSyncTable` / `EnqueueDocumentUpdate`。
+
 ## 事务说明
 
 - 默认 `Create/Update/Delete` 会在当前数据库事务内写入 outbox，由 relay 异步投递到 ES。
@@ -444,6 +468,8 @@ app essyncer reconcile Article --repair
 
 - outbox 行是增量同步的 durable source of truth，ES 变成派生读模型。
 - relay 每次 claim 一批 `pending/expired processing` 行，成功标记 `sent`，失败按 backoff 重试，超过阈值进入 `dead`。
+- claim 通过条件 UPDATE + `RowsAffected == 1` 完成，并写入一次性的 `lease_token`；多实例 relay 并行运行时同一行只会被一个实例认领。租约过期后行可以被重新认领，此时旧 token 失效，上一持有者的写回会被拒绝。
+- ES 整体不可达（连接失败 / 超时，拿不到 HTTP 响应）不消耗 `max_attempts` 预算，行留在 `pending` 等 ES 恢复；`429/502/503/504` 等 HTTP 层失败按 `max_attempts` 计数，耗尽后进入 `dead`。
 - `Shutdown(ctx)` 会先停 relay 拉取，再等待当前 in-flight batch 结束，然后关闭共享 indexer。
 
 ## FullSync 语义说明
@@ -455,18 +481,23 @@ app essyncer reconcile Article --repair
 - `FullSyncWithCheckpoint` 仅适用于支持 `int64` checkpoint 的扫描策略。
 - `SoftDeleteModeUpdate` 会在全量同步时使用 `Unscoped()`，用于重建带 `deleted_at` 字段的软删除文档。
 - `SoftDeleteModeDelete` 与无软删除模型使用默认作用域；全量同步不会把软删除行重新写回 ES。
-- alias 解析、临时索引创建、alias 切换任一步失败都会立即终止当前模型的全量同步。
+- alias 解析、临时索引创建、alias 切换任一步失败都会立即终止当前模型的全量同步，临时索引会被清理，线上 alias 保持指向旧索引。
+- 全量同步期间旧索引照常在线，查询方通过 alias 访问，切换是一次 `_aliases` 原子操作，没有空窗期。
+- 全量同步会在 alias 切换成功后删除 alias 此前指向的全部物理索引。
+- 使用约束：全量扫描与增量投递并行运行时，某一行若在「被扫描之后、alias 切换之前」发生变更，这次变更会被 relay 投递到旧索引并随之删除，需要等该行下次变更才会重新同步。安排在业务低峰执行，或在切换后对该模型补一次 `reconcile`。
 
-## 生产就绪边界
+## 一致性模型
 
-- 当前版本已修复事务提交时序、TLS 默认安全、失败观测、作用域选择、FullSync correctness blocker，并补上了 transactional outbox + relay 基础闭环。
-- 这仍然不是“数据库与 ES 强一致”。当前语义是：DB 真源、ES 最终一致、失败可重试、dead 行可持久化排查。
-- 要进一步逼近企业生产级，还需要接入方补齐对账修复、full sync 补尾、outbox 表迁移治理和运行告警。
+- 数据库是真源，ES 是派生读模型，二者之间是**最终一致**：业务写提交后，relay 在 `poll_interval` 量级内把变更投递到 ES。
+- 投递语义是 at-least-once：同一条 outbox 行可能被投递多次。ES 写入按 `document_id` 做覆盖（index / update / delete），因此重复投递收敛到同一结果。
+- 失败可重试，重试耗尽的行落到 `dead` 状态持久化在 `outbox_events` 表里，可用 `outbox list --status dead` 排查、`outbox replay` 重放。
+- 接入方需要自行准备的部分：`outbox_events` 表的 migration（见下方建表 SQL）、把 `GetMetrics()` / `RecentFailures()` 接到监控告警、按业务节奏安排 `reconcile` 对账。
 
 ## 可观测性说明
 
 - `GetMetrics()` 现在除了累计计数，还会返回最近一次错误摘要，以及 outbox/relay 相关计数。
 - `RecentFailures(limit)` 返回最近 N 条失败样本，适合挂到内部健康检查或 debug 接口。
+- `sync_events_skipped_unidentified` 统计因无法确定受影响行主键而被跳过的写操作次数，对应失败样本的 source 是 `unidentified_rows`。
 - `WithFailureHook(...)` 可把 relay/full sync 失败转发到告警系统、Sentry 或自定义 dead-letter sink。
 - 失败样本默认只保存在进程内存里；持久化恢复面是 `outbox_events` 表里的 `pending/dead` 行。
 

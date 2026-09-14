@@ -409,9 +409,12 @@ func TestResolveModels_UsesStatementFallbacks(t *testing.T) {
 			db := openBlockerTestDB(t)
 			syncer := newBlockerTestSyncer(t, db, &fakeBulkIndexer{})
 
-			models, entry := syncer.resolveModels(tt.buildTx(t, db))
+			models, entry, identified := syncer.resolveModels(tt.buildTx(t, db))
 			if entry == nil || len(models) != tt.wantLen {
 				t.Fatalf("resolveModels entry=%#v models=%#v", entry, models)
+			}
+			if !identified {
+				t.Fatal("expected resolved models to carry primary key identity")
 			}
 		})
 	}

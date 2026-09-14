@@ -21,7 +21,9 @@ type Metrics struct {
 	SyncEventsBuffered    atomic.Int64
 	SyncEventsFlushed     atomic.Int64
 	SyncEventsSkippedTx   atomic.Int64
-	FullSyncErrorsTotal   atomic.Int64
+	// SyncEventsSkippedUnidentified 统计因无法确定受影响行主键而未产生同步事件的写操作次数。
+	SyncEventsSkippedUnidentified atomic.Int64
+	FullSyncErrorsTotal           atomic.Int64
 }
 
 // MetricsSnapshot 用于 JSON 序列化（Gin 健康检查接口）。
@@ -36,20 +38,21 @@ type MetricsSnapshot struct {
 	RelayRetriesTotal     int64 `json:"relay_retries_total"`
 	RelayDeadTotal        int64 `json:"relay_dead_total"`
 
-	LastFlushAtUnixMs      int64  `json:"last_flush_at_unix_ms"`
-	LastFlushDurationMs    int64  `json:"last_flush_duration_ms"`
-	LastFlushItems         int64  `json:"last_flush_items"`
-	LastErrorAtUnixMs      int64  `json:"last_error_at_unix_ms"`
-	LastErrorSource        string `json:"last_error_source"`
-	LastErrorIndex         string `json:"last_error_index"`
-	LastErrorAction        string `json:"last_error_action"`
-	LastErrorDocumentID    string `json:"last_error_document_id"`
-	LastErrorText          string `json:"last_error_text"`
-	SyncEventsBuffered     int64  `json:"sync_events_buffered"`
-	SyncEventsFlushed      int64  `json:"sync_events_flushed"`
-	SyncEventsSkippedTx    int64  `json:"sync_events_skipped_tx"`
-	FullSyncErrorsTotal    int64  `json:"full_sync_errors_total"`
-	FailureSamplesRetained int64  `json:"failure_samples_retained"`
+	LastFlushAtUnixMs             int64  `json:"last_flush_at_unix_ms"`
+	LastFlushDurationMs           int64  `json:"last_flush_duration_ms"`
+	LastFlushItems                int64  `json:"last_flush_items"`
+	LastErrorAtUnixMs             int64  `json:"last_error_at_unix_ms"`
+	LastErrorSource               string `json:"last_error_source"`
+	LastErrorIndex                string `json:"last_error_index"`
+	LastErrorAction               string `json:"last_error_action"`
+	LastErrorDocumentID           string `json:"last_error_document_id"`
+	LastErrorText                 string `json:"last_error_text"`
+	SyncEventsBuffered            int64  `json:"sync_events_buffered"`
+	SyncEventsFlushed             int64  `json:"sync_events_flushed"`
+	SyncEventsSkippedTx           int64  `json:"sync_events_skipped_tx"`
+	SyncEventsSkippedUnidentified int64  `json:"sync_events_skipped_unidentified"`
+	FullSyncErrorsTotal           int64  `json:"full_sync_errors_total"`
+	FailureSamplesRetained        int64  `json:"failure_samples_retained"`
 
 	BulkNumAdded   int64 `json:"bulk_num_added"`
 	BulkNumFlushed int64 `json:"bulk_num_flushed"`
@@ -61,25 +64,26 @@ type MetricsSnapshot struct {
 
 func (m *Metrics) snapshot(stats esutil.BulkIndexerStats) MetricsSnapshot {
 	return MetricsSnapshot{
-		EnqueuedTotal:         m.EnqueuedTotal.Load(),
-		DroppedTotal:          m.DroppedTotal.Load(),
-		FullSyncDocs:          m.FullSyncDocs.Load(),
-		FullSyncTables:        m.FullSyncTables.Load(),
-		DeadLetters:           m.DeadLetters.Load(),
-		OutboxEventsPersisted: m.OutboxEventsPersisted.Load(),
-		RelayProcessedTotal:   m.RelayProcessedTotal.Load(),
-		RelayRetriesTotal:     m.RelayRetriesTotal.Load(),
-		RelayDeadTotal:        m.RelayDeadTotal.Load(),
-		SyncEventsBuffered:    m.SyncEventsBuffered.Load(),
-		SyncEventsFlushed:     m.SyncEventsFlushed.Load(),
-		SyncEventsSkippedTx:   m.SyncEventsSkippedTx.Load(),
-		FullSyncErrorsTotal:   m.FullSyncErrorsTotal.Load(),
-		BulkNumAdded:          clampUint64ToInt64(stats.NumAdded),
-		BulkNumFlushed:        clampUint64ToInt64(stats.NumFlushed),
-		BulkNumFailed:         clampUint64ToInt64(stats.NumFailed),
-		BulkNumIndexed:        clampUint64ToInt64(stats.NumIndexed),
-		BulkNumUpdated:        clampUint64ToInt64(stats.NumUpdated),
-		BulkNumDeleted:        clampUint64ToInt64(stats.NumDeleted),
+		EnqueuedTotal:                 m.EnqueuedTotal.Load(),
+		DroppedTotal:                  m.DroppedTotal.Load(),
+		FullSyncDocs:                  m.FullSyncDocs.Load(),
+		FullSyncTables:                m.FullSyncTables.Load(),
+		DeadLetters:                   m.DeadLetters.Load(),
+		OutboxEventsPersisted:         m.OutboxEventsPersisted.Load(),
+		RelayProcessedTotal:           m.RelayProcessedTotal.Load(),
+		RelayRetriesTotal:             m.RelayRetriesTotal.Load(),
+		RelayDeadTotal:                m.RelayDeadTotal.Load(),
+		SyncEventsBuffered:            m.SyncEventsBuffered.Load(),
+		SyncEventsFlushed:             m.SyncEventsFlushed.Load(),
+		SyncEventsSkippedTx:           m.SyncEventsSkippedTx.Load(),
+		SyncEventsSkippedUnidentified: m.SyncEventsSkippedUnidentified.Load(),
+		FullSyncErrorsTotal:           m.FullSyncErrorsTotal.Load(),
+		BulkNumAdded:                  clampUint64ToInt64(stats.NumAdded),
+		BulkNumFlushed:                clampUint64ToInt64(stats.NumFlushed),
+		BulkNumFailed:                 clampUint64ToInt64(stats.NumFailed),
+		BulkNumIndexed:                clampUint64ToInt64(stats.NumIndexed),
+		BulkNumUpdated:                clampUint64ToInt64(stats.NumUpdated),
+		BulkNumDeleted:                clampUint64ToInt64(stats.NumDeleted),
 	}
 }
 

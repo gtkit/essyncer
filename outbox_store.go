@@ -2,6 +2,8 @@ package essyncer
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -120,7 +122,8 @@ func (s *outboxStore) claimPending(ctx context.Context, batchSize int, leaseDura
 		if len(claimed) >= batchSize {
 			break
 		}
-		ok, err := s.tryClaimRow(ctx, candidate.ID, now, leaseUntil)
+		token := newLeaseToken()
+		ok, err := s.tryClaimRow(ctx, candidate.ID, now, leaseUntil, token)
 		if err != nil {
 			return nil, fmt.Errorf("claim pending outbox rows: claim id %d: %w", candidate.ID, err)
 		}
@@ -129,16 +132,26 @@ func (s *outboxStore) claimPending(ctx context.Context, batchSize int, leaseDura
 		}
 		candidate.Status = OutboxStatusProcessing
 		candidate.LeasedUntil = &leaseUntil
+		candidate.LeaseToken = token
 		claimed = append(claimed, candidate)
 	}
 
 	return claimed, nil
 }
 
-func (s *outboxStore) tryClaimRow(ctx context.Context, id int64, now, leaseUntil time.Time) (bool, error) {
+// newLeaseToken 生成一次租约的 fencing 凭证。crypto/rand.Read 自 Go 1.24 起
+// 保证填满缓冲且不返回错误。
+func newLeaseToken() string {
+	var buf [16]byte
+	_, _ = rand.Read(buf[:])
+	return hex.EncodeToString(buf[:])
+}
+
+func (s *outboxStore) tryClaimRow(ctx context.Context, id int64, now, leaseUntil time.Time, token string) (bool, error) {
 	updates := map[string]any{
 		"status":       OutboxStatusProcessing,
 		"leased_until": leaseUntil,
+		"lease_token":  token,
 	}
 	result := s.db.WithContext(ctx).Model(&OutboxEvent{}).
 		Where("id = ?", id).
@@ -153,7 +166,7 @@ func (s *outboxStore) tryClaimRow(ctx context.Context, id int64, now, leaseUntil
 }
 
 func (s *outboxStore) markSent(ctx context.Context, row OutboxEvent) error {
-	leaseUntil, err := rowLease(row)
+	token, err := rowLeaseToken(row)
 	if err != nil {
 		return fmt.Errorf("mark outbox row sent: %w", err)
 	}
@@ -162,17 +175,18 @@ func (s *outboxStore) markSent(ctx context.Context, row OutboxEvent) error {
 		"status":        OutboxStatusSent,
 		"sent_at":       now,
 		"leased_until":  nil,
+		"lease_token":   "",
 		"last_error":    "",
 		"next_retry_at": nil,
 	}
-	if err := s.updateClaimedRow(ctx, row.ID, leaseUntil, updates); err != nil {
+	if err := s.updateClaimedRow(ctx, row.ID, token, updates); err != nil {
 		return fmt.Errorf("mark outbox row sent: %w", err)
 	}
 	return nil
 }
 
 func (s *outboxStore) markRetry(ctx context.Context, row OutboxEvent, retryAt time.Time, reason error) error {
-	leaseUntil, err := rowLease(row)
+	token, err := rowLeaseToken(row)
 	if err != nil {
 		return fmt.Errorf("mark outbox row retry: %w", err)
 	}
@@ -188,15 +202,16 @@ func (s *outboxStore) markRetry(ctx context.Context, row OutboxEvent, retryAt ti
 		"next_retry_at": retryAt.UTC(),
 		"last_error":    errText,
 		"leased_until":  nil,
+		"lease_token":   "",
 	}
-	if err := s.updateClaimedRow(ctx, row.ID, leaseUntil, updates); err != nil {
+	if err := s.updateClaimedRow(ctx, row.ID, token, updates); err != nil {
 		return fmt.Errorf("mark outbox row retry: %w", err)
 	}
 	return nil
 }
 
 func (s *outboxStore) markDead(ctx context.Context, row OutboxEvent, reason error) error {
-	leaseUntil, err := rowLease(row)
+	token, err := rowLeaseToken(row)
 	if err != nil {
 		return fmt.Errorf("mark outbox row dead: %w", err)
 	}
@@ -210,29 +225,32 @@ func (s *outboxStore) markDead(ctx context.Context, row OutboxEvent, reason erro
 		"attempts":      nextAttempts,
 		"last_error":    errText,
 		"leased_until":  nil,
+		"lease_token":   "",
 		"next_retry_at": nil,
 	}
-	if err := s.updateClaimedRow(ctx, row.ID, leaseUntil, updates); err != nil {
+	if err := s.updateClaimedRow(ctx, row.ID, token, updates); err != nil {
 		return fmt.Errorf("mark outbox row dead: %w", err)
 	}
 	return nil
 }
 
-func rowLease(row OutboxEvent) (time.Time, error) {
+// rowLeaseToken 取出行的租约凭证。空 token 必须被拒绝：否则
+// updateClaimedRow 的 lease_token = "" 条件会匹配到所有已结束租约的行。
+func rowLeaseToken(row OutboxEvent) (string, error) {
 	if row.ID <= 0 {
-		return time.Time{}, errors.New("invalid row id")
+		return "", errors.New("invalid row id")
 	}
-	if row.LeasedUntil == nil {
-		return time.Time{}, errors.New("missing lease")
+	if row.LeaseToken == "" {
+		return "", errors.New("missing lease token")
 	}
-	return row.LeasedUntil.UTC(), nil
+	return row.LeaseToken, nil
 }
 
-func (s *outboxStore) updateClaimedRow(ctx context.Context, id int64, leaseUntil time.Time, updates map[string]any) error {
+func (s *outboxStore) updateClaimedRow(ctx context.Context, id int64, token string, updates map[string]any) error {
 	result := s.db.WithContext(ctx).Model(&OutboxEvent{}).
 		Where("id = ?", id).
 		Where("status = ?", OutboxStatusProcessing).
-		Where("leased_until = ?", leaseUntil).
+		Where("lease_token = ?", token).
 		Updates(updates)
 	if result.Error != nil {
 		return fmt.Errorf("update claimed row: %w", result.Error)

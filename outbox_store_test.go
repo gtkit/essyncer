@@ -96,7 +96,7 @@ func TestOutboxStore_ClaimPending_ReclaimsExpiredAndClaimsExclusively(t *testing
 
 				now := time.Now().UTC()
 				leaseUntil := now.Add(30 * time.Second)
-				ok, err := storeB.tryClaimRow(t.Context(), first[0].ID, now, leaseUntil)
+				ok, err := storeB.tryClaimRow(t.Context(), first[0].ID, now, leaseUntil, newLeaseToken())
 				if err != nil {
 					t.Fatalf("second cas claim check: %v", err)
 				}
@@ -205,11 +205,15 @@ func TestOutboxStore_MarkUpdates_RequireMatchingLease(t *testing.T) {
 				t.Fatalf("expected 1 claimed row, got %d", len(claimed))
 			}
 
-			newLease := time.Now().UTC().Add(time.Minute)
+			// 模拟另一个 relay 抢走租约：lease_token 是 fencing 凭证，
+			// 原持有者手里的旧 token 必须再也更新不了这一行。
 			if updateErr := db.WithContext(t.Context()).
 				Model(&OutboxEvent{}).
 				Where("id = ?", claimed[0].ID).
-				Updates(map[string]any{"leased_until": newLease}).Error; updateErr != nil {
+				Updates(map[string]any{
+					"leased_until": time.Now().UTC().Add(time.Minute),
+					"lease_token":  newLeaseToken(),
+				}).Error; updateErr != nil {
 				t.Fatalf("simulate lease handoff: %v", updateErr)
 			}
 

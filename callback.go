@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 const (
@@ -74,8 +75,12 @@ func (s *Syncer) afterCreate(db *gorm.DB) {
 	if db.Error != nil || db.Statement == nil {
 		return
 	}
-	models, entry := s.resolveModels(db)
+	models, entry, identified := s.resolveModels(db)
 	if entry == nil || !entry.autoSync {
+		return
+	}
+	if !identified {
+		s.recordUnidentifiedRows(entry, actionIndex)
 		return
 	}
 	events := make([]syncEvent, 0, len(models))
@@ -98,8 +103,12 @@ func (s *Syncer) afterUpdate(db *gorm.DB) {
 	if db.Error != nil || db.Statement == nil {
 		return
 	}
-	models, entry := s.resolveModels(db)
+	models, entry, identified := s.resolveModels(db)
 	if entry == nil || !entry.autoSync {
+		return
+	}
+	if !identified {
+		s.recordUnidentifiedRows(entry, actionUpdate)
 		return
 	}
 
@@ -152,8 +161,12 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 	if db.Error != nil || db.Statement == nil {
 		return
 	}
-	models, entry := s.resolveModels(db)
+	models, entry, identified := s.resolveModels(db)
 	if entry == nil || !entry.autoSync {
+		return
+	}
+	if !identified {
+		s.recordUnidentifiedRows(entry, actionDelete)
 		return
 	}
 	isUnscoped := db.Statement.Unscoped
@@ -198,21 +211,25 @@ func (s *Syncer) afterDelete(db *gorm.DB) {
 	s.enqueueEvents(db, events...)
 }
 
-func (s *Syncer) resolveModels(db *gorm.DB) ([]any, *modelEntry) {
+// resolveModels 解析本次写操作命中的模型实例。第三个返回值表示这些实例是否带有
+// 非零主键：批量 UPDATE / DELETE（如 Where("status = ?").Update(...)）在 callback 里
+// 只能看到零值 model，此时无法确定受影响的行，调用方必须跳过而不是拿零值主键造文档。
+func (s *Syncer) resolveModels(db *gorm.DB) ([]any, *modelEntry, bool) {
 	if db.Statement == nil {
-		return nil, nil
+		return nil, nil, false
 	}
 
 	entry := s.resolveModelEntry(db)
 	if entry == nil {
-		return nil, nil
+		return nil, nil, false
 	}
 
-	return resolveModelCandidates(db.Statement.Context, entry,
+	models, identified := resolveModelCandidates(db.Statement.Context, entry,
 		db.Statement.ReflectValue,
 		reflect.ValueOf(db.Statement.Model),
 		reflect.ValueOf(db.Statement.Dest),
-	), entry
+	)
+	return models, entry, identified
 }
 
 func (s *Syncer) resolveModelEntry(db *gorm.DB) *modelEntry {
@@ -241,7 +258,7 @@ func (s *Syncer) resolveModelEntry(db *gorm.DB) *modelEntry {
 	return entry
 }
 
-func resolveModelCandidates(ctx context.Context, entry *modelEntry, candidates ...reflect.Value) []any {
+func resolveModelCandidates(ctx context.Context, entry *modelEntry, candidates ...reflect.Value) ([]any, bool) {
 	var fallback []any
 
 	for _, candidate := range candidates {
@@ -253,11 +270,11 @@ func resolveModelCandidates(ctx context.Context, entry *modelEntry, candidates .
 			fallback = models
 		}
 		if entry != nil && modelsHavePrimaryIdentity(ctx, entry, models) {
-			return models
+			return models, true
 		}
 	}
 
-	return fallback
+	return fallback, false
 }
 
 func modelsHavePrimaryIdentity(ctx context.Context, entry *modelEntry, models []any) bool {
@@ -267,7 +284,7 @@ func modelsHavePrimaryIdentity(ctx context.Context, entry *modelEntry, models []
 
 	for _, model := range models {
 		value := reflect.ValueOf(model)
-		for value.Kind() == reflect.Interface || value.Kind() == reflect.Ptr {
+		for value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
 			if value.IsNil() {
 				return false
 			}
@@ -288,7 +305,7 @@ func extractModels(v reflect.Value) []any {
 	if !v.IsValid() {
 		return nil
 	}
-	for v.Kind() == reflect.Interface || v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return nil
 		}
@@ -302,7 +319,7 @@ func extractModels(v reflect.Value) []any {
 			for elem.Kind() == reflect.Interface {
 				elem = elem.Elem()
 			}
-			if elem.Kind() == reflect.Ptr {
+			if elem.Kind() == reflect.Pointer {
 				if !elem.IsNil() {
 					models = append(models, elem.Interface())
 				}
@@ -328,7 +345,7 @@ func extractChangedFields(db *gorm.DB) map[string]any {
 	if dest, ok := db.Statement.Dest.(map[string]any); ok {
 		changed := make(map[string]any, len(dest))
 		for k, v := range dest {
-			changed[k] = v
+			changed[normalizeColumnName(db.Statement.Schema, k)] = v
 		}
 		return changed
 	}
@@ -337,7 +354,7 @@ func extractChangedFields(db *gorm.DB) map[string]any {
 	}
 	changed := make(map[string]any)
 	destVal := reflect.ValueOf(db.Statement.Dest)
-	if destVal.Kind() == reflect.Ptr {
+	if destVal.Kind() == reflect.Pointer {
 		destVal = destVal.Elem()
 	}
 	for _, field := range db.Statement.Schema.Fields {
@@ -347,4 +364,17 @@ func extractChangedFields(db *gorm.DB) map[string]any {
 		}
 	}
 	return changed
+}
+
+// normalizeColumnName 把 Updates(map[string]any{...}) 的 key 归一化成数据库列名。
+// gorm 对 map 更新同时接受 Go 字段名与列名（Updates(map[string]any{"Title": x}) 合法），
+// 不归一化就会把 Go 字段名原样发给 ES，写出一个与 mapping 无关的新字段。
+func normalizeColumnName(s *schema.Schema, key string) string {
+	if s == nil {
+		return key
+	}
+	if field := s.LookUpField(key); field != nil && field.DBName != "" {
+		return field.DBName
+	}
+	return key
 }

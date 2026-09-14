@@ -14,6 +14,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// errUnsupportedOutboxAction 标记一条 action 字段无法识别的 outbox 行。它和
+// "没拿到 HTTP 响应" 同样返回 status 0，但属于这一行自己的问题，必须计入重试预算
+// 并最终进 dead，否则毒丸行会永久占用 relay。
+var errUnsupportedOutboxAction = errors.New("unsupported outbox action")
+
 type outboxBatchResult struct {
 	Claimed   int
 	Processed int64
@@ -170,7 +175,11 @@ func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) (string,
 		return OutboxStatusSent, nil
 	}
 
-	retryable := status == 0 || classifyRetryable(status)
+	// status == 0 表示请求没有拿到 HTTP 响应（连接失败 / 超时），是 ES 整体不可达，
+	// 不是这一行的问题。这类失败不消耗 MaxAttempts 预算：否则一次超过
+	// PollInterval*2^MaxAttempts 的 ES 停机会把全部待投递行冲进 dead，只能人工 replay。
+	transportFailure := status == 0 && !errors.Is(sendErr, errUnsupportedOutboxAction)
+	retryable := transportFailure || classifyRetryable(status)
 	s.recordFailure(FailureEvent{
 		Source:     failureSourceRelay,
 		Index:      row.IndexAlias,
@@ -181,7 +190,7 @@ func (s *Syncer) processOutboxRow(ctx context.Context, row OutboxEvent) (string,
 		Retryable:  retryable,
 	})
 
-	if retryable && row.Attempts < s.cfg.Outbox.MaxAttempts {
+	if retryable && (transportFailure || row.Attempts < s.cfg.Outbox.MaxAttempts) {
 		retryAt := time.Now().UTC().Add(s.relayBackoff(row.Attempts + 1))
 		if err := s.outbox.markRetry(storeCtx, row, retryAt, sendErr); err != nil {
 			s.recordFailure(FailureEvent{
@@ -274,7 +283,7 @@ func (s *Syncer) sendOutboxRow(ctx context.Context, row OutboxEvent) (int, error
 		}
 		res, err = req.Do(ctx, s.es)
 	default:
-		return 0, fmt.Errorf("unsupported outbox action %q", row.Action)
+		return 0, fmt.Errorf("%w %q", errUnsupportedOutboxAction, row.Action)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("send outbox row %s %s: %w", row.Action, row.DocumentID, err)

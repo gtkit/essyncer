@@ -22,6 +22,9 @@ type OutboxEvent struct {
 	NextRetryAt *time.Time `gorm:"column:next_retry_at;index"`
 	LastError   string     `gorm:"column:last_error;type:text"`
 	LeasedUntil *time.Time `gorm:"column:leased_until;index"`
-	CreatedAt   time.Time  `gorm:"column:created_at;autoCreateTime"`
-	SentAt      *time.Time `gorm:"column:sent_at"`
+	// LeaseToken 是每次 claim 生成的租约凭证。它而不是 leased_until 用于后续更新的
+	// fencing 判定：DATETIME 列按列精度四舍五入存储，Go 侧的微秒时间戳与之相等比较必然失败。
+	LeaseToken string     `gorm:"column:lease_token;type:varchar(32)"`
+	CreatedAt  time.Time  `gorm:"column:created_at;autoCreateTime"`
+	SentAt     *time.Time `gorm:"column:sent_at"`
 }

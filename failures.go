@@ -1,8 +1,11 @@
 package essyncer
 
 import (
+	"fmt"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 const defaultFailureBufferSize = 128
@@ -14,7 +17,9 @@ const (
 	failureSourceRelay    = "relay"
 	failureSourceDead     = "relay_dead"
 	failureSourceTxSkip   = "tx_skip"
-	actionSkip            = "skip"
+	// failureSourceUnidentified 标记一次数据库写因为无法确定受影响行的主键而未产生同步事件。
+	failureSourceUnidentified = "unidentified_rows"
+	actionSkip                = "skip"
 )
 
 type FailureEvent struct {
@@ -137,4 +142,26 @@ func classifyRetryable(status int) bool {
 	default:
 		return false
 	}
+}
+
+// recordUnidentifiedRows 记录一次被跳过的写操作：数据库已经写入，但 callback 无法
+// 确定受影响行的主键（批量 UPDATE / DELETE 在 callback 里只能看到零值 model），
+// 因此没有产生 ES 同步事件。这里不回写 db.Error——同步侧的缺口不应该把业务写变成失败；
+// 缺口通过 metrics、失败样本与告警日志暴露，由 FullSyncTable 或 EnqueueDocumentUpdate 补齐。
+func (s *Syncer) recordUnidentifiedRows(entry *modelEntry, action actionType) {
+	s.metrics.SyncEventsSkippedUnidentified.Add(1)
+	s.recordFailure(FailureEvent{
+		Source: failureSourceUnidentified,
+		Index:  entry.indexName,
+		Action: string(action),
+		Error: fmt.Sprintf(
+			"table %s: bulk %s without loaded primary keys; the database write succeeded but no ES sync event was produced. "+
+				"Write by primary key, or run FullSyncTable / EnqueueDocumentUpdate for the affected rows.",
+			entry.tableName, action),
+	})
+	s.logger.Warn("essyncer: write skipped, affected primary keys unknown",
+		zap.String("table", entry.tableName),
+		zap.String("index", entry.indexName),
+		zap.String("action", string(action)),
+	)
 }

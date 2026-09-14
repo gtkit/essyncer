@@ -156,9 +156,12 @@ func TestResolveModelsAndChangedFields_FromDryRunUpdate(t *testing.T) {
 			syncer := newBlockerTestSyncer(t, db, &fakeBulkIndexer{})
 
 			tx := tt.buildTx(db)
-			models, entry := syncer.resolveModels(tx)
+			models, entry, identified := syncer.resolveModels(tx)
 			if entry == nil || len(models) != 1 {
 				t.Fatalf("unexpected resolved models: entry=%#v models=%#v", entry, models)
+			}
+			if !identified {
+				t.Fatal("expected resolved models to carry primary key identity")
 			}
 
 			syncable, ok := models[0].(Syncable)

@@ -239,7 +239,7 @@ func (k *fullSyncKey) valueOf(ctx context.Context, v reflect.Value) (any, error)
 
 func hasSoftDeleteField(model any) bool {
 	t := reflect.TypeOf(model)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
@@ -256,7 +256,7 @@ func containsType(t, target reflect.Type) bool {
 		}
 		if field.Anonymous {
 			ft := field.Type
-			if ft.Kind() == reflect.Ptr {
+			if ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct && containsType(ft, target) {
@@ -292,7 +292,7 @@ func deepCopyModel(src any) (any, error) {
 		return src, nil
 	}
 	srcVal := reflect.ValueOf(src)
-	if srcVal.Kind() == reflect.Ptr {
+	if srcVal.Kind() == reflect.Pointer {
 		dst := reflect.New(srcVal.Elem().Type()).Interface()
 		if err := copier.CopyWithOption(dst, src, copier.Option{DeepCopy: true}); err != nil {
 			return nil, fmt.Errorf("essyncer: deep copy: %w", err)

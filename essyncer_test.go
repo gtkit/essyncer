@@ -164,7 +164,7 @@ func TestNewModelSlice(t *testing.T) {
 	entry := &modelEntry{modelType: reflect.TypeOf(testArticle{})}
 	slicePtr := newModelSlice(entry)
 	v := reflect.ValueOf(slicePtr)
-	if v.Kind() != reflect.Ptr || v.Elem().Kind() != reflect.Slice {
+	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Slice {
 		t.Fatal("expected pointer to slice")
 	}
 	if v.Elem().Type().Elem() != reflect.TypeOf(testArticle{}) {

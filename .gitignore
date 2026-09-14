@@ -1,10 +1,7 @@
 .idea/
 .Ds_Store
 docs/
-task_plan.md
-findings.md
-progress.md
-.harness
-CLAUDE.md
-AGENTS.md
-.learnings/
+.vscode/
+.DS_Store
+*.log
+*.out

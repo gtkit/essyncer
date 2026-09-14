@@ -69,6 +69,7 @@ type blockerOutboxEvent struct {
 	NextRetryAt *time.Time `gorm:"column:next_retry_at"`
 	LastError   string     `gorm:"column:last_error"`
 	LeasedUntil *time.Time `gorm:"column:leased_until"`
+	LeaseToken  string     `gorm:"column:lease_token"`
 	CreatedAt   time.Time  `gorm:"column:created_at"`
 	SentAt      *time.Time `gorm:"column:sent_at"`
 }
