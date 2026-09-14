@@ -42,15 +42,14 @@ type Syncer struct {
 	failureHook       func(FailureEvent)
 	failureBufferSize int
 	failureInit       sync.Once
-	flushState        flushSummary
 	stopped           atomic.Bool
 	newBulkIndexer    func(esutil.BulkIndexerConfig) (esutil.BulkIndexer, error)
 	outbox            *outboxStore
 	relayMu           sync.Mutex
-	relayCtx          context.Context
 	relayCancel       context.CancelFunc
 	relayWG           sync.WaitGroup
 	relayRunning      bool
+	relayPanic        atomic.Pointer[string]
 }
 
 // New 创建并启动 Syncer。
@@ -76,6 +75,17 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	s.cfg = normalizeOutboxConfig(s.cfg)
 	s.outbox = newOutboxStore(s.db)
 	effectiveCfg := s.cfg
+
+	// mapping 校验只读本地文件，放在建立任何连接与 BulkIndexer 之前：
+	// 之前它在 indexer 创建之后，校验失败直接 return 会把 indexer 的 worker
+	// goroutine 连同它持有的连接一起漏掉。
+	for _, tc := range effectiveCfg.Sync.Tables {
+		if tc.MappingFile != "" {
+			if _, verr := LoadMappingFromFile(tc.MappingFile); verr != nil {
+				return nil, fmt.Errorf("essyncer: validate mapping %s: %w", tc.Model, verr)
+			}
+		}
+	}
 
 	// --- 构建 ES8 客户端配置 ---
 	esCfg := elasticsearch.Config{
@@ -160,15 +170,6 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 		return nil, fmt.Errorf("essyncer: create bulk indexer: %w", err)
 	}
 	s.indexer = indexer
-
-	// 校验 mapping 文件
-	for _, tc := range effectiveCfg.Sync.Tables {
-		if tc.MappingFile != "" {
-			if _, verr := LoadMappingFromFile(tc.MappingFile); verr != nil {
-				return nil, fmt.Errorf("essyncer: validate mapping %s: %w", tc.Model, verr)
-			}
-		}
-	}
 
 	s.logger.Info("essyncer: initialized",
 		zap.Int("workers", workers),
@@ -276,19 +277,15 @@ func (s *Syncer) GetMetrics() MetricsSnapshot {
 	}
 	snapshot.FailureSamplesRetained = int64(retained)
 
-	lastFlushAt, lastFlushDuration, lastFlushItems := s.flushState.snapshot()
-	if !lastFlushAt.IsZero() {
-		snapshot.LastFlushAtUnixMs = lastFlushAt.UnixMilli()
-		snapshot.LastFlushDurationMs = lastFlushDuration.Milliseconds()
-		snapshot.LastFlushItems = lastFlushItems
-	}
-
 	return snapshot
 }
 
 func (s *Syncer) Health(ctx context.Context) error {
 	if s.stopped.Load() {
 		return errors.New("essyncer: stopped")
+	}
+	if message := s.relayPanic.Load(); message != nil {
+		return errors.New("essyncer: " + *message)
 	}
 	res, err := s.es.Ping(s.es.Ping.WithContext(ctx))
 	if err != nil {
@@ -312,30 +309,44 @@ func (s *Syncer) makeBulkIndexer(cfg esutil.BulkIndexerConfig) (esutil.BulkIndex
 	return indexer, nil
 }
 
+// Shutdown 停止 relay 并关闭 indexer。两步都会执行：relay 等待超时是最需要
+// 兜底释放 indexer 的时候，提前 return 会把它的 worker goroutine 留在原地。
+// 多次调用是安全的。
 func (s *Syncer) Shutdown(ctx context.Context) error {
 	s.stopped.Store(true)
 	s.stopOutboxRelay()
-	if err := s.waitOutboxRelay(ctx); err != nil {
-		return err
-	}
+	waitErr := s.waitOutboxRelay(ctx)
+
 	if s.indexer == nil {
-		return nil
+		return waitErr
 	}
-	if err := s.indexer.Close(ctx); err != nil {
-		s.logger.Error("essyncer: close indexer", zap.Error(err))
-		return fmt.Errorf("essyncer: shutdown: %w", err)
+
+	closeErr := s.indexer.Close(ctx)
+	if closeErr != nil {
+		s.logger.Error("essyncer: close indexer", zap.Error(closeErr))
+		closeErr = fmt.Errorf("essyncer: shutdown: %w", closeErr)
+	} else {
+		stats := s.indexer.Stats()
+		s.logger.Info("essyncer: shutdown done",
+			zap.Uint64("flushed", stats.NumFlushed),
+			zap.Uint64("failed", stats.NumFailed),
+		)
 	}
-	stats := s.indexer.Stats()
-	s.logger.Info("essyncer: shutdown done",
-		zap.Uint64("flushed", stats.NumFlushed),
-		zap.Uint64("failed", stats.NumFailed),
-	)
-	return nil
+	return errors.Join(waitErr, closeErr)
 }
 
 // --- Index 管理 ---
 
-func (s *Syncer) EnsureIndex(ctx context.Context, entry *modelEntry) error {
+// EnsureIndex 为已注册的模型确保 alias 与底层物理索引存在。
+func (s *Syncer) EnsureIndex(ctx context.Context, model Syncable) error {
+	entry, ok := s.registry.getByModel(s.db, model)
+	if !ok {
+		return errors.New("essyncer: model not registered")
+	}
+	return s.ensureIndexEntry(ctx, entry)
+}
+
+func (s *Syncer) ensureIndexEntry(ctx context.Context, entry *modelEntry) error {
 	state, err := s.resolveAliasState(ctx, entry.indexName)
 	if err != nil {
 		return err
@@ -351,7 +362,7 @@ func (s *Syncer) EnsureIndex(ctx context.Context, entry *modelEntry) error {
 func (s *Syncer) EnsureAllIndices(ctx context.Context) error {
 	var firstErr error
 	s.registry.forEach(func(tableName string, entry *modelEntry) bool {
-		if err := s.EnsureIndex(ctx, entry); err != nil {
+		if err := s.ensureIndexEntry(ctx, entry); err != nil {
 			s.logger.Error("essyncer: ensure index", zap.String("table", tableName), zap.Error(err))
 			firstErr = err
 			return false

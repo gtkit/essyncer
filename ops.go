@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	json "github.com/gtkit/json"
+	json "github.com/gtkit/json/v2"
 )
 
 type OutboxListOptions struct {

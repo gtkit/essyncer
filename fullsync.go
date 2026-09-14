@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -63,11 +64,7 @@ func (s *Syncer) FullSync(ctx context.Context, models ...Syncable) []FullSyncRes
 					return
 				default:
 				}
-				total, err := s.fullSyncTable(ctx, entry)
-				resultCh <- FullSyncResult{
-					Table: entry.tableName, IndexName: entry.indexName,
-					TotalSynced: total, Err: err,
-				}
+				resultCh <- s.fullSyncTableGuarded(ctx, entry)
 			}
 		})
 	}
@@ -86,6 +83,34 @@ func (s *Syncer) FullSync(ctx context.Context, models ...Syncable) []FullSyncRes
 	return results
 }
 
+// fullSyncTableGuarded 把一个模型的全量同步 panic 收敛成该模型的失败结果。
+// 这些 worker 跑在库自己起的 goroutine 上，调用方 recover 不到；不拦住的话
+// 一个模型的编程错误会带走整个进程，其余模型的同步结果也一并丢失。
+func (s *Syncer) fullSyncTableGuarded(ctx context.Context, entry *modelEntry) (result FullSyncResult) {
+	result = FullSyncResult{Table: entry.tableName, IndexName: entry.indexName}
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+		result.Err = fmt.Errorf("essyncer: full sync %s panicked: %v", entry.tableName, recovered)
+		s.recordFailure(FailureEvent{
+			Source: failureSourceFullSync,
+			Index:  entry.indexName,
+			Action: string(actionIndex),
+			Error:  result.Err.Error(),
+		})
+		s.logger.Error("essyncer: full sync panicked",
+			zap.String("table", entry.tableName),
+			zap.Any("panic", recovered),
+			zap.String("stack", string(debug.Stack())),
+		)
+	}()
+
+	result.TotalSynced, result.Err = s.fullSyncTable(ctx, entry)
+	return result
+}
+
 func (s *Syncer) validateFullSyncEntries(entries []*modelEntry, startID int64) (*modelEntry, error) {
 	for _, entry := range entries {
 		if _, err := entry.fullSyncCursor(startID); err != nil {
@@ -97,7 +122,7 @@ func (s *Syncer) validateFullSyncEntries(entries []*modelEntry, startID int64) (
 
 func (s *Syncer) ensureIndices(ctx context.Context, entries []*modelEntry) (*modelEntry, error) {
 	for _, entry := range entries {
-		if err := s.EnsureIndex(ctx, entry); err != nil {
+		if err := s.ensureIndexEntry(ctx, entry); err != nil {
 			return entry, err
 		}
 	}

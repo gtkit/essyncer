@@ -1,9 +1,12 @@
 package essyncer
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,5 +237,223 @@ func TestProcessOutboxRow_TransportFailureKeepsRowRetryable(t *testing.T) {
 				t.Fatalf("lease token must be cleared after the row leaves processing, got %q", got.LeaseToken)
 			}
 		})
+	}
+}
+
+// closeTrackingIndexer 记录 Close 是否被调用，用于验证关停路径不漏 indexer。
+type closeTrackingIndexer struct {
+	fakeBulkIndexer
+	mu       sync.Mutex
+	closeHit bool
+}
+
+func (c *closeTrackingIndexer) Close(context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeHit = true
+	return nil
+}
+
+func (c *closeTrackingIndexer) closed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeHit
+}
+
+// TestShutdown_ClosesIndexerEvenWhenRelayWaitTimesOut 锁定：relay 等待超时是最需要
+// 兜底释放 indexer 的时刻。把 Shutdown 改回 waitOutboxRelay 失败即 return，
+// 本测试会因为 indexer 未关闭而失败。
+func TestShutdown_ClosesIndexerEvenWhenRelayWaitTimesOut(t *testing.T) {
+	db := openBlockerTestDB(t)
+	setupOutboxTable(t, db)
+	indexer := &closeTrackingIndexer{}
+	syncer := newBlockerTestSyncer(t, db, indexer)
+	syncer.outbox = newOutboxStore(db)
+
+	// 让 relay 卡在一次投递里，使 waitOutboxRelay 必然超时
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	syncer.es = newTestElasticsearchClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-release
+		return jsonResponse(req, http.StatusOK, `{}`), nil
+	}))
+	seed := OutboxEvent{
+		TableName: "blocker_articles", IndexAlias: "blocker_articles", DocumentID: "1",
+		Action: string(actionIndex), Payload: []byte(`{"id":1}`), Status: OutboxStatusPending,
+	}
+	if err := db.WithContext(t.Context()).Create(&seed).Error; err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
+	if err := syncer.StartOutboxRelay(t.Context()); err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	waitUntil(t, time.Second, func() bool {
+		var row OutboxEvent
+		if err := db.First(&row, seed.ID).Error; err != nil {
+			return false
+		}
+		return row.Status == OutboxStatusProcessing
+	}, "relay to claim the row")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err := syncer.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("expected shutdown to report the relay wait timeout")
+	}
+	if !indexer.closed() {
+		t.Fatal("indexer must be closed even when the relay wait times out")
+	}
+}
+
+// TestStartOutboxRelay_PanicIsContainedAndSurfacedByHealth 锁定：库自己起的 relay
+// goroutine 里的 panic 不能带走进程，而且必须让 Health 开始报错——否则进程活着、
+// HTTP 正常，增量同步已经停了却没有任何信号。去掉 recoverRelayPanic，
+// 本测试会让整个测试进程崩溃。
+func TestStartOutboxRelay_PanicIsContainedAndSurfacedByHealth(t *testing.T) {
+	db := openBlockerTestDB(t)
+	setupOutboxTable(t, db)
+	syncer := newBlockerTestSyncer(t, db, &fakeBulkIndexer{})
+	syncer.outbox = newOutboxStore(db)
+	// Health 的 ping 走同一个 transport，只让投递路径 panic。
+	syncer.es = newTestElasticsearchClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodHead {
+			return jsonResponse(req, http.StatusOK, `{}`), nil
+		}
+		panic("boom inside the delivery path")
+	}))
+
+	seed := OutboxEvent{
+		TableName: "blocker_articles", IndexAlias: "blocker_articles", DocumentID: "1",
+		Action: string(actionIndex), Payload: []byte(`{"id":1}`), Status: OutboxStatusPending,
+	}
+	if err := db.WithContext(t.Context()).Create(&seed).Error; err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
+
+	if err := syncer.Health(t.Context()); err != nil {
+		t.Fatalf("health must be clean before the panic: %v", err)
+	}
+	if err := syncer.StartOutboxRelay(t.Context()); err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+
+	waitUntil(t, 2*time.Second, func() bool {
+		return syncer.Health(t.Context()) != nil
+	}, "health to report the stopped relay")
+
+	healthErr := syncer.Health(t.Context())
+	if !strings.Contains(healthErr.Error(), "panicked") {
+		t.Fatalf("health error must name the panic, got %v", healthErr)
+	}
+
+	var found bool
+	for _, failure := range syncer.RecentFailures(10) {
+		if strings.Contains(failure.Error, "panicked") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected a failure sample recording the relay panic")
+	}
+}
+
+// TestRunOutboxRelay_BlocksUntilContextCancel 锁定阻塞版入口的契约：它在调用方的
+// goroutine 上运行，ctx 取消后返回；宿主的 worker 管理器据此接管 panic 与关停。
+func TestRunOutboxRelay_BlocksUntilContextCancel(t *testing.T) {
+	db := openBlockerTestDB(t)
+	setupOutboxTable(t, db)
+	syncer := newBlockerTestSyncer(t, db, &fakeBulkIndexer{})
+	syncer.outbox = newOutboxStore(db)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- syncer.RunOutboxRelay(ctx) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("relay returned before the context was canceled: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("relay returned %v, want nil after cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay did not return after the context was canceled")
+	}
+}
+
+// TestRunOutboxRelay_PanicPropagatesToCaller 锁定阻塞版入口不吞 panic：
+// 它必须冒泡到宿主的 worker 管理器，由宿主按自己的 Required 语义处理。
+func TestRunOutboxRelay_PanicPropagatesToCaller(t *testing.T) {
+	db := openBlockerTestDB(t)
+	setupOutboxTable(t, db)
+	syncer := newBlockerTestSyncer(t, db, &fakeBulkIndexer{})
+	syncer.outbox = newOutboxStore(db)
+	syncer.es = newTestElasticsearchClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		panic("boom inside the delivery path")
+	}))
+	seed := OutboxEvent{
+		TableName: "blocker_articles", IndexAlias: "blocker_articles", DocumentID: "1",
+		Action: string(actionIndex), Payload: []byte(`{"id":1}`), Status: OutboxStatusPending,
+	}
+	if err := db.WithContext(t.Context()).Create(&seed).Error; err != nil {
+		t.Fatalf("seed outbox row: %v", err)
+	}
+
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		_ = syncer.RunOutboxRelay(t.Context())
+	}()
+
+	select {
+	case recovered := <-panicked:
+		if recovered == nil {
+			t.Fatal("RunOutboxRelay must not swallow the panic")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("panic did not reach the caller")
+	}
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestNew_ValidatesMappingBeforeAllocatingResources 锁定：mapping 校验必须发生在
+// 建立 ES 连接与 BulkIndexer 之前。校验一旦排在 indexer 之后，失败时直接 return
+// 会把 indexer 的 worker goroutine 漏掉；此处用一个必定连不上的地址反证顺序——
+// 若顺序被改回，返回的会是连接错误而不是 mapping 错误。
+func TestNew_ValidatesMappingBeforeAllocatingResources(t *testing.T) {
+	badMapping := t.TempDir() + "/bad.json"
+	if err := os.WriteFile(badMapping, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write mapping: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Elasticsearch.Addresses = []string{"http://127.0.0.1:1"}
+	cfg.Elasticsearch.RequestTimeout = 200 * time.Millisecond
+	cfg.Sync.Tables = []TableConfig{{Model: "Article", MappingFile: badMapping}}
+
+	_, err := New(openBlockerTestDB(t), cfg)
+	if err == nil {
+		t.Fatal("expected New to fail on an invalid mapping file")
+	}
+	if !strings.Contains(err.Error(), "validate mapping") {
+		t.Fatalf("mapping must be validated before any connection is made, got %v", err)
 	}
 }

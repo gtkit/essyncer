@@ -147,6 +147,11 @@ func (f *fakeBulkIndexer) Add(ctx context.Context, item esutil.BulkIndexerItem) 
 }
 
 func (f *fakeBulkIndexer) Close(context.Context) error { return nil }
+
+// Flush 由 go-elasticsearch 8.19 起加入 BulkIndexer 接口。这里的替身按调用即完成
+// 处理：测试中的 Add 是同步记录的，没有需要排空的队列。
+func (f *fakeBulkIndexer) Flush(context.Context) error { return nil }
+
 func (f *fakeBulkIndexer) Stats() esutil.BulkIndexerStats {
 	f.mu.Lock()
 	defer f.mu.Unlock()

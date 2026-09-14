@@ -379,7 +379,7 @@ func TestOutboxPayload_MatchesRelayRequestBody(t *testing.T) {
 	}
 }
 
-func TestOutboxPayload_RequiresGTKitJSONV0210InOutboxPath(t *testing.T) {
+func TestOutboxPayload_RequiresGTKitJSONInOutboxPath(t *testing.T) {
 	tests := []struct {
 		name         string
 		file         string
@@ -389,13 +389,13 @@ func TestOutboxPayload_RequiresGTKitJSONV0210InOutboxPath(t *testing.T) {
 		{
 			name:         "outbox store uses gtkit json",
 			file:         "outbox_store.go",
-			expectImport: `"github.com/gtkit/json"`,
+			expectImport: `"github.com/gtkit/json/v2"`,
 			denyImport:   `"encoding/json"`,
 		},
 		{
 			name:         "outbox relay uses gtkit json",
 			file:         "outbox_relay.go",
-			expectImport: `"github.com/gtkit/json"`,
+			expectImport: `"github.com/gtkit/json/v2"`,
 			denyImport:   `"encoding/json"`,
 		},
 	}
@@ -415,14 +415,6 @@ func TestOutboxPayload_RequiresGTKitJSONV0210InOutboxPath(t *testing.T) {
 				t.Fatalf("file %s must not import %s in outbox payload path", tt.file, tt.denyImport)
 			}
 		})
-	}
-
-	data, err := os.ReadFile("go.mod")
-	if err != nil {
-		t.Fatalf("read go.mod: %v", err)
-	}
-	if !strings.Contains(string(data), "github.com/gtkit/json v0.2.10") {
-		t.Fatal("go.mod must pin github.com/gtkit/json v0.2.10 for outbox payload path")
 	}
 }
 

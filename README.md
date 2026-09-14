@@ -49,7 +49,7 @@ syncer.RegisterFromConfig(map[string]essyncer.Syncable{
 })
 
 syncer.EnableAutoSync(db)
-_ = syncer.StartOutboxRelay(ctx)
+_ = syncer.StartOutboxRelay(ctx) // 或 syncer.RunOutboxRelay(ctx) 交给宿主的 worker 管理器阻塞驱动
 syncer.FullSync(ctx)
 
 // 或者只对指定模型启用增量同步 / 全量同步
@@ -474,7 +474,9 @@ ALTER TABLE outbox_events ADD COLUMN lease_token VARCHAR(32) AFTER leased_until;
 - `FullSync(ctx)` 表示同步所有已注册模型；`FullSync(ctx, &Article{}, &User{})` 表示只同步指定模型。
 - `syncer.Transaction(...)` 和原生 `db.Transaction(...)` 都会让业务数据与 outbox 同事务提交，不再走 `tx_skip`。
 - 应用必须自行通过 migration 创建 `outbox_events` 表；库不会在生产路径里自动建表。
-- `StartOutboxRelay(ctx)` 需要显式启动；不启动 relay 时，outbox 只会累积，不会投递到 ES。
+- relay 需要显式启动；不启动 relay 时，outbox 只会累积，不会投递到 ES。两种启动方式按谁托管 goroutine 来选：
+  - `StartOutboxRelay(ctx)`：库自己起后台 goroutine，非阻塞返回。relay 循环里的 panic 由库拦下，转成一条失败样本，`Health(ctx)` 随后开始报错。
+  - `RunOutboxRelay(ctx)`：在调用方的 goroutine 上阻塞运行，ctx 取消后返回 nil，panic 原样冒泡给调用方。宿主有 worker 管理器（负责 panic 恢复、关停排序、异常退出上报）时用这个，relay 就纳入宿主统一治理。
 
 ## Outbox 语义说明
 
@@ -507,9 +509,11 @@ ALTER TABLE outbox_events ADD COLUMN lease_token VARCHAR(32) AFTER leased_until;
 
 ## 可观测性说明
 
-- `GetMetrics()` 现在除了累计计数，还会返回最近一次错误摘要，以及 outbox/relay 相关计数。
+- `GetMetrics()` 返回 outbox/relay 的累计计数、BulkIndexer 统计与最近一次错误摘要。每个字段都有对应的写入点，不会出现恒为 0 的占位指标。
 - `RecentFailures(limit)` 返回最近 N 条失败样本，适合挂到内部健康检查或 debug 接口。
 - `sync_events_skipped_unidentified` 统计因无法确定受影响行主键而被跳过的写操作次数，对应失败样本的 source 是 `unidentified_rows`。
+- `Health(ctx)` 除了 ping ES，还会在 relay 因 panic 停止后持续报错——进程还活着但增量同步已经停了，这种状态必须能被探针发现。
+- `Shutdown(ctx)` 会先停 relay 再关 BulkIndexer，两步都执行：即使等待 relay 收尾超时，indexer 也会被关闭，错误用 `errors.Join` 一并返回。
 - `WithFailureHook(...)` 可把 relay/full sync 失败转发到告警系统、Sentry 或自定义 dead-letter sink。
 - 失败样本默认只保存在进程内存里；持久化恢复面是 `outbox_events` 表里的 `pending/dead` 行。
 

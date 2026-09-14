@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	json "github.com/gtkit/json"
+	json "github.com/gtkit/json/v2"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"

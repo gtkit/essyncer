@@ -203,9 +203,6 @@ func TestReconcileCountsAndSyncerUtilities(t *testing.T) {
 				syncer.failures = newFailureRecorder(2)
 				syncer.failureInit = sync.Once{}
 				syncer.recordFailure(FailureEvent{Source: failureSourceRelay, Error: "latest failure"})
-				syncer.flushState.lastAt = time.Now()
-				syncer.flushState.lastDuration = time.Second
-				syncer.flushState.lastItems = 3
 				syncer.indexer = &fakeBulkIndexer{
 					stats: esutil.BulkIndexerStats{
 						NumAdded:   math.MaxUint64,
@@ -214,7 +211,7 @@ func TestReconcileCountsAndSyncerUtilities(t *testing.T) {
 				}
 
 				metrics := syncer.GetMetrics()
-				if metrics.BulkNumAdded != math.MaxInt64 || metrics.LastErrorText != "latest failure" || metrics.LastFlushItems != 3 {
+				if metrics.BulkNumAdded != math.MaxInt64 || metrics.LastErrorText != "latest failure" {
 					t.Fatalf("unexpected metrics snapshot: %#v", metrics)
 				}
 				stoppedSyncer := &Syncer{}

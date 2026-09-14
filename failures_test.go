@@ -136,12 +136,6 @@ func TestUserManagedTransactionSkip_PersistsOutboxWithoutSkipFailure(t *testing.
 	if payload["doc"]["title"] != "tx skip" {
 		t.Fatalf("outbox payload doc.title = %#v, want tx skip", payload["doc"]["title"])
 	}
-
-	for _, failure := range s.RecentFailures(10) {
-		if failure.Source == failureSourceTxSkip {
-			t.Fatalf("unexpected tx_skip failure event: %#v", failure)
-		}
-	}
 }
 
 func TestFullSyncAddFailure_RecordsFailureEvent(t *testing.T) {
@@ -167,7 +161,7 @@ func TestFullSyncAddFailure_RecordsFailureEvent(t *testing.T) {
 	}
 }
 
-func TestGetMetrics_IncludesFailureAndFlushSummary(t *testing.T) {
+func TestGetMetrics_IncludesOutboxPersistence(t *testing.T) {
 	db := openBlockerTestDB(t)
 	setupOutboxTable(t, db)
 	indexer := &fakeBulkIndexer{}
@@ -193,11 +187,5 @@ func TestGetMetrics_IncludesFailureAndFlushSummary(t *testing.T) {
 	metrics := s.GetMetrics()
 	if metrics.OutboxEventsPersisted == 0 {
 		t.Fatalf("expected outbox persistence metrics to be populated, got %#v", metrics)
-	}
-	if metrics.SyncEventsBuffered != 0 || metrics.SyncEventsFlushed != 0 || metrics.LastFlushItems != 0 {
-		t.Fatalf("expected no callback-time buffer/flush metrics in outbox mode, got %#v", metrics)
-	}
-	if metrics.LastErrorSource == failureSourceTxSkip || metrics.SyncEventsSkippedTx != 0 {
-		t.Fatalf("expected no tx_skip metrics in outbox path, got %#v", metrics)
 	}
 }

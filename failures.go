@@ -16,10 +16,8 @@ const (
 	failureSourceOps      = "ops"
 	failureSourceRelay    = "relay"
 	failureSourceDead     = "relay_dead"
-	failureSourceTxSkip   = "tx_skip"
 	// failureSourceUnidentified 标记一次数据库写因为无法确定受影响行的主键而未产生同步事件。
 	failureSourceUnidentified = "unidentified_rows"
-	actionSkip                = "skip"
 )
 
 type FailureEvent struct {
@@ -92,19 +90,6 @@ func (r *failureRecorder) summary() (last FailureEvent, hasLast bool, retained i
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.last, r.hasLast, r.count
-}
-
-type flushSummary struct {
-	mu           sync.Mutex
-	lastAt       time.Time
-	lastDuration time.Duration
-	lastItems    int64
-}
-
-func (f *flushSummary) snapshot() (time.Time, time.Duration, int64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.lastAt, f.lastDuration, f.lastItems
 }
 
 func (s *Syncer) initObservability() {

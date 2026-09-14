@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8/esapi"
-	json "github.com/gtkit/json"
+	json "github.com/gtkit/json/v2"
 	"go.uber.org/zap"
 )
 
@@ -47,23 +48,86 @@ func (s *Syncer) StartOutboxRelay(ctx context.Context) error {
 	}
 
 	relayCtx, cancel := context.WithCancel(ctx)
-	s.relayCtx = relayCtx
 	s.relayCancel = cancel
 	s.relayRunning = true
 	s.relayWG.Add(1)
 
 	go func() {
 		defer s.relayWG.Done()
-		_, _ = s.runOutboxRelay(relayCtx)
-
-		s.relayMu.Lock()
-		s.relayRunning = false
-		s.relayCtx = nil
-		s.relayCancel = nil
-		s.relayMu.Unlock()
+		defer func() {
+			s.relayMu.Lock()
+			s.relayRunning = false
+			s.relayCancel = nil
+			s.relayMu.Unlock()
+		}()
+		// relay 跑在库自己起的 goroutine 上，宿主的 recover 覆盖不到这里：
+		// 不拦住 panic，一次投递路径上的编程错误就会带走接入方的整个进程。
+		defer s.recoverRelayPanic()
+		_ = s.runOutboxRelay(relayCtx)
 	}()
 
 	return nil
+}
+
+// RunOutboxRelay 在调用方的 goroutine 里阻塞运行 relay 循环，直到 ctx 取消后返回 nil。
+// 它不拦截 panic：交给宿主的 worker 管理器统一处理 panic、重启与关停顺序。
+// 需要库自行托管后台 goroutine 时用 StartOutboxRelay。
+func (s *Syncer) RunOutboxRelay(ctx context.Context) error {
+	if s.stopped.Load() {
+		return errors.New("essyncer: stopped")
+	}
+	if ctx == nil {
+		return errors.New("essyncer: run outbox relay: nil context")
+	}
+	if s.db == nil {
+		return errors.New("essyncer: run outbox relay: nil db")
+	}
+	if err := s.ensureOutboxStore(); err != nil {
+		return fmt.Errorf("essyncer: run outbox relay: %w", err)
+	}
+
+	s.relayMu.Lock()
+	if s.relayRunning {
+		s.relayMu.Unlock()
+		return errors.New("essyncer: outbox relay already running")
+	}
+	relayCtx, cancel := context.WithCancel(ctx)
+	s.relayCancel = cancel
+	s.relayRunning = true
+	s.relayWG.Add(1)
+	s.relayMu.Unlock()
+
+	defer s.relayWG.Done()
+	defer func() {
+		s.relayMu.Lock()
+		s.relayRunning = false
+		s.relayCancel = nil
+		s.relayMu.Unlock()
+		cancel()
+	}()
+
+	return s.runOutboxRelay(relayCtx)
+}
+
+// recoverRelayPanic 把 relay goroutine 的 panic 转成一条可观测的失败事件。
+// relay 就此停止，Health 会开始报错——否则进程活着、HTTP 正常，而增量同步
+// 已经不工作了，没有任何信号。
+func (s *Syncer) recoverRelayPanic() {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	stack := string(debug.Stack())
+	message := fmt.Sprintf("outbox relay panicked: %v", recovered)
+	s.relayPanic.Store(&message)
+	s.recordFailure(FailureEvent{
+		Source: failureSourceRelay,
+		Error:  message,
+	})
+	s.logger.Error("essyncer: outbox relay panicked, relay stopped",
+		zap.Any("panic", recovered),
+		zap.String("stack", stack),
+	)
 }
 
 func (s *Syncer) stopOutboxRelay() {
@@ -94,8 +158,7 @@ func (s *Syncer) waitOutboxRelay(ctx context.Context) error {
 	}
 }
 
-func (s *Syncer) runOutboxRelay(ctx context.Context) (outboxBatchResult, error) {
-	var total outboxBatchResult
+func (s *Syncer) runOutboxRelay(ctx context.Context) error {
 	pollInterval := s.cfg.Outbox.PollInterval
 	if pollInterval <= 0 {
 		pollInterval = 2 * time.Second
@@ -107,16 +170,11 @@ func (s *Syncer) runOutboxRelay(ctx context.Context) (outboxBatchResult, error) 
 	for {
 		select {
 		case <-ctx.Done():
-			return total, nil
+			return nil
 		case <-timer.C:
 		}
 
-		batch, err := s.runOutboxBatch(ctx)
-		total.Claimed += batch.Claimed
-		total.Processed += batch.Processed
-		total.Retried += batch.Retried
-		total.Dead += batch.Dead
-		if err != nil && ctx.Err() == nil {
+		if _, err := s.runOutboxBatch(ctx); err != nil && ctx.Err() == nil {
 			s.recordFailure(FailureEvent{
 				Source: failureSourceRelay,
 				Error:  err.Error(),
