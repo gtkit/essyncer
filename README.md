@@ -440,6 +440,18 @@ CREATE TABLE outbox_events (
 
 `lease_token` 是 relay 认领行时写入的租约凭证，后续 `sent` / 重试 / `dead` 的写回都按它做 fencing 判定。时间列可以用任意精度（`DATETIME`、`DATETIME(3)`、`DATETIME(6)`）：fencing 不依赖时间列的存储精度。
 
+### 已有 outbox_events 表的升级
+
+如果在 v1.0.0 之前就按源码接入并建过 `outbox_events` 表，该表缺少 `lease_token` 列，relay 认领行时会直接报 `Unknown column 'lease_token'`。补一次 migration：
+
+```sql
+ALTER TABLE outbox_events ADD COLUMN lease_token VARCHAR(32) AFTER leased_until;
+```
+
+执行时机：先停 relay（`Shutdown(ctx)` 或停掉进程），加完列再启动。加列期间 outbox 只累积不投递，业务写不受影响。
+
+加列后 `lease_token` 对已有行是 NULL，这些行会在下一轮 claim 时被重新认领并写入新 token，不需要手工订正。若升级前有行停在 `processing` 状态，等 `leased_until` 到期后会自动被重新认领。
+
 ## 自动同步覆盖的写法
 
 `EnableAutoSync` 在 GORM callback 里捕获变更，因此覆盖范围是**经过 GORM 且能在 callback 中拿到主键的写操作**：

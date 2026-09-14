@@ -9,7 +9,7 @@
 ### Outbox 租约
 
 - relay 认领 outbox 行时写入一次性 `lease_token`，`sent` / 重试 / `dead` 的写回按 token 做 fencing 判定，不再依赖 `leased_until` 的相等比较。MySQL 按列精度存储 DATETIME，Go 侧的微秒时间戳与 `DATETIME` / `DATETIME(3)` 列相等比较必然失败，会让每次状态写回都报 lease mismatch、行停在 `processing`、relay 陷入重复投递。
-- 接入方的 `outbox_events` 表需要包含 `lease_token VARCHAR(32)` 列，建表 SQL 见 README。
+- 接入方的 `outbox_events` 表需要包含 `lease_token VARCHAR(32)` 列。新建表的 DDL 与已有表的 `ALTER TABLE` 升级语句见 README「outbox_events 建表」章节。
 
 ### 增量同步
 
