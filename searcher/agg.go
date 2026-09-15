@@ -1,8 +1,8 @@
 package searcher
 
 import (
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types/enums/calendarinterval"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types/enums/calendarinterval"
 )
 
 // TermsAgg 创建 Terms 聚合。

@@ -1,12 +1,12 @@
-# essyncer — GORM → Elasticsearch 8.x 数据同步模块
+# essyncer — GORM → Elasticsearch 9.x 数据同步模块
 
-用于 GORM 数据库与 Elasticsearch 8.x 自动数据同步的 Go 模块。
+用于 GORM 数据库与 Elasticsearch 9.x 自动数据同步的 Go 模块。
 
 ## 技术栈
 
 | 组件 | 选型 |
 |------|------|
-| ES 客户端 | `github.com/elastic/go-elasticsearch/v8`（官方 TypedAPI） |
+| ES 客户端 | `github.com/elastic/go-elasticsearch/v9`（官方 TypedAPI） |
 | JSON | Go 标准库 `encoding/json` + `github.com/gtkit/json v0.2.10`（outbox payload path） |
 | 日志 | `github.com/gtkit/logger`（兼容 zap.Field 签名） |
 | 深拷贝 | `github.com/jinzhu/copier` |
@@ -18,10 +18,10 @@
 - **全量同步**：临时物理索引重建 + alias 原子切换 + 可配置扫描策略
 - **增量同步**：GORM Callback 零侵入 + Transactional Outbox + Relay
 - **软删除**：自动检测 `gorm.DeletedAt`；`update` 模式保留软删除文档，`delete` 模式删除 ES 文档
-- **ES8 TypedAPI 查询**：泛型链式 API，singleflight 合并重复请求
+- **ES9 TypedAPI 查询**：泛型链式 API，singleflight 合并重复请求
 - **Relay 重试/DLQ**：按 outbox lease / retry / dead 状态推进
 - **Metrics 可观测**：全 atomic 无锁，对接 Gin 健康检查
-- **TLS 支持**：ES8 安全连接
+- **TLS 支持**：ES9 安全连接
 
 ## 快速开始
 
@@ -541,7 +541,7 @@ ALTER TABLE outbox_events ADD COLUMN lease_token VARCHAR(32) AFTER leased_until;
 └──────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────┐
-│      searcher (ES8 TypedAPI)              │
+│      searcher (ES9 TypedAPI)              │
 │                                           │
 │  NewSearch[T]().Must().Filter().Do()     │
 │       ├─ singleflight 合并重复查询        │
@@ -569,7 +569,7 @@ essyncer/
 ├── log.go           # Logger 接口
 ├── model.go         # 模型注册 + copier 深拷贝
 ├── metrics.go       # 运行时指标
-├── syncer.go        # 核心（ES8 客户端 + BulkIndexer）
+├── syncer.go        # 核心（ES9 客户端 + BulkIndexer）
 ├── callback.go      # GORM Callback 增量同步
 ├── fullsync.go      # 全量同步
 ├── searcher/

@@ -4,7 +4,7 @@ import (
 	"math"
 	"sync/atomic"
 
-	"github.com/elastic/go-elasticsearch/v8/esutil"
+	"github.com/elastic/go-elasticsearch/v9/esutil"
 )
 
 // Metrics 提供运行时可观测指标，全 atomic 无锁。

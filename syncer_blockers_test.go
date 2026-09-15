@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/elastic/go-elasticsearch/v8/esutil"
+	"github.com/elastic/go-elasticsearch/v9"
+	"github.com/elastic/go-elasticsearch/v9/esutil"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -176,6 +176,7 @@ func firstNonEmpty(values ...string) string {
 func newTestElasticsearchClient(t *testing.T, transport http.RoundTripper) *elasticsearch.Client {
 	t.Helper()
 
+	//nolint:staticcheck // SA1019: v9 的 Config 仍完全可用，构造器迁移另行处理
 	client, err := elasticsearch.NewClient(elasticsearch.Config{
 		Addresses: []string{"http://example.test"},
 		Transport: transport,

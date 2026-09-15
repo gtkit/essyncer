@@ -1,7 +1,7 @@
 package searcher
 
 import (
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 )
 
 // 返回 types.Query，可直接传入 Search.Must/Should/Filter/MustNot。

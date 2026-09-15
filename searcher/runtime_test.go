@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/core/search"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
+	"github.com/elastic/go-elasticsearch/v9"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 )
 
 func TestAdvancedQueryBuilders(t *testing.T) {

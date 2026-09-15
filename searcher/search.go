@@ -8,17 +8,17 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/core/search"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types/enums/sortorder"
+	"github.com/elastic/go-elasticsearch/v9"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types/enums/sortorder"
 	"golang.org/x/sync/singleflight"
 )
 
 // 全局 singleflight group，合并相同查询条件的并发请求。
 var sfGroup singleflight.Group
 
-// Search 是泛型链式 ES8 查询构建器。
+// Search 是泛型链式 ES9 查询构建器。
 // 默认自动过滤软删除文档，可通过 Unscoped() 取消。
 type Search[T any] struct {
 	client *elasticsearch.TypedClient
@@ -291,7 +291,9 @@ func (s *Search[T]) buildRequest() *search.Request {
 		for _, f := range s.highlightFields {
 			fields[f] = types.HighlightField{}
 		}
-		req.Highlight = &types.Highlight{Fields: fields}
+		// v9 的 Highlight.Fields 是 []map[string]HighlightField（v8 为 map[string]HighlightField）。
+		// 这里用单元素切片承载，与升级前语义等价：一组字段共用默认高亮配置。
+		req.Highlight = &types.Highlight{Fields: []map[string]types.HighlightField{fields}}
 	}
 
 	// 聚合

@@ -29,7 +29,7 @@ type ESConfig struct {
 	MaxRetries       int           `yaml:"max_retries"`
 	RetryOnStatus    []int         `yaml:"retry_on_status"`
 	RequestTimeout   time.Duration `yaml:"request_timeout"`
-	CACert           string        `yaml:"ca_cert"`            // ES8 TLS 证书路径（可选）
+	CACert           string        `yaml:"ca_cert"`            // ES9 TLS 证书路径（可选）
 	AllowInsecureTLS bool          `yaml:"allow_insecure_tls"` // 仅开发调试时显式启用
 }
 

@@ -11,7 +11,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8/esapi"
+	"github.com/elastic/go-elasticsearch/v9/esapi"
 	"go.uber.org/zap"
 )
 

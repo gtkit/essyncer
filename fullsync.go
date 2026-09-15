@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8/esutil"
+	"github.com/elastic/go-elasticsearch/v9/esutil"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )

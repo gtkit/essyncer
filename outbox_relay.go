@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8/esapi"
+	"github.com/elastic/go-elasticsearch/v9/esapi"
 	json "github.com/gtkit/json/v2"
 	"go.uber.org/zap"
 )

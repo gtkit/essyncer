@@ -2,6 +2,30 @@
 
 本文件记录 essyncer 的版本变更。
 
+## [Unreleased]
+
+### ⚠ 破坏性变更
+
+- **服务端版本要求由 Elasticsearch 8.x 变为 9.x。** ES 客户端主线升级到 `github.com/elastic/go-elasticsearch/v9`，其 typedapi 的请求结构按 9.x 的 REST spec 生成，对 8.x 服务端不保证被接受。
+  **这一点编译期不可见**——升级依赖后代码照样编译通过，连到 8.x 集群才会在实际请求处失败。
+  迁移步骤：
+  1. 把 Elasticsearch 集群升级到 9.x。
+  2. 若你的代码也直接导入了 `github.com/elastic/go-elasticsearch/v8`，改为 `/v9`；与 `essyncer` 交换 `*elasticsearch.Client` 或 `*elasticsearch.TypedClient` 的地方会出现类型不匹配的编译错误，据此定位即可。
+  3. 不使用 `searcher` 高亮功能的调用方无需其他改动；使用高亮的调用代码也无需改动。
+
+### Changed
+
+- 依赖 `github.com/elastic/go-elasticsearch/v8` v8.19.7 → `github.com/elastic/go-elasticsearch/v9` v9.5.2。间接依赖 `github.com/elastic/elastic-transport-go/v8` 仍为 `/v8`——v9 客户端内部依旧引用它，未跟随改 major。
+- `searcher` 构造高亮请求时适配 v9 的类型变化：`types.Highlight.Fields` 由 `map[string]HighlightField` 变为 `[]map[string]HighlightField`，现用单元素切片承载，生成的请求体与升级前语义等价（一组字段共用默认高亮配置）。实测形状为 `{"highlight":{"fields":[{"status":{},"title":{}}]}}`。
+- 启动日志由 `essyncer: es8 connected` 改为 `essyncer: es9 connected`；按该文本做日志匹配的告警规则需同步更新。
+- 源码注释中的 ES8 表述统一改为 ES9。
+
+### 说明
+
+- 本次不改动任何导出 API：升级前后导出符号集合逐项比对，147 个符号零差异。
+- 本次不改动同步、outbox、全量同步逻辑，既有测试未作任何断言调整即全部通过（`-race`）。
+- v9 把 `elasticsearch.Config`、`NewClient`、`NewTypedClient` 标记为 `Deprecated`（其说明写明仍完全可用），本次保留现有构造器并以 `//nolint:staticcheck` 标注理由；切换到函数式选项构造器属于独立改动，不夹带进主线升级。
+
 ## v1.1.0
 
 ### ⚠ 破坏性变更

@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/elastic/go-elasticsearch/v8/esutil"
+	"github.com/elastic/go-elasticsearch/v9"
+	"github.com/elastic/go-elasticsearch/v9/esutil"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -27,7 +27,7 @@ const (
 	actionDelete actionType = "delete"
 )
 
-// Syncer 是 GORM → ES8 数据同步器。
+// Syncer 是 GORM → ES9 数据同步器。
 // 使用 esutil.BulkIndexer 作为写入引擎（自带 worker pool + flush + 重试）。
 type Syncer struct {
 	cfg               Config
@@ -87,7 +87,10 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 		}
 	}
 
-	// --- 构建 ES8 客户端配置 ---
+	// --- 构建 ES9 客户端配置 ---
+	// v9 把 Config 与 NewClient / NewTypedClient 标记为 Deprecated，改推函数式选项，
+	// 但其废弃说明写明这些仍完全可用。切换构造器属于独立改动，不夹进本次主线升级。
+	//nolint:staticcheck // SA1019: v9 的 Config 仍完全可用，构造器迁移另行处理
 	esCfg := elasticsearch.Config{
 		Addresses:     effectiveCfg.Elasticsearch.Addresses,
 		RetryOnStatus: effectiveCfg.Elasticsearch.RetryOnStatus,
@@ -97,7 +100,7 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 		esCfg.Username = effectiveCfg.Elasticsearch.Username
 		esCfg.Password = effectiveCfg.Elasticsearch.Password
 	}
-	// ES8 TLS 证书支持
+	// ES9 TLS 证书支持
 	if effectiveCfg.Elasticsearch.CACert != "" {
 		cert, err := os.ReadFile(effectiveCfg.Elasticsearch.CACert)
 		if err != nil {
@@ -112,11 +115,13 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	esCfg.Transport = transport
 
 	// 创建低级客户端
+	//nolint:staticcheck // SA1019: 同上，与 Config 一并迁移
 	client, err := elasticsearch.NewClient(esCfg)
 	if err != nil {
 		return nil, fmt.Errorf("essyncer: create es client: %w", err)
 	}
 	// 创建 TypedClient（用于搜索 DSL）
+	//nolint:staticcheck // SA1019: 同上，与 Config 一并迁移
 	typedClient, err := elasticsearch.NewTypedClient(esCfg)
 	if err != nil {
 		return nil, fmt.Errorf("essyncer: create typed client: %w", err)
@@ -140,7 +145,7 @@ func New(db *gorm.DB, cfg Config, opts ...Option) (*Syncer, error) {
 	s.es = client
 	s.typed = typedClient
 
-	s.logger.Info("essyncer: es8 connected", zap.String("status", res.Status()))
+	s.logger.Info("essyncer: es9 connected", zap.String("status", res.Status()))
 
 	// --- 创建 BulkIndexer ---
 	workers := max(effectiveCfg.Sync.Workers, 1)

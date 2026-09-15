@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
+	"github.com/elastic/go-elasticsearch/v9"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -366,6 +366,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func newTestTypedClient(t *testing.T, transport http.RoundTripper) *elasticsearch.TypedClient {
 	t.Helper()
 
+	//nolint:staticcheck // SA1019: v9 的 Config 仍完全可用，构造器迁移另行处理
 	client, err := elasticsearch.NewTypedClient(elasticsearch.Config{
 		Addresses: []string{"http://example.test"},
 		Transport: transport,

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/elastic/go-elasticsearch/v8/typedapi/core/search"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 )
 
 // SearchResult 是泛型搜索结果。
@@ -27,7 +27,7 @@ type AggResult struct {
 	Aggregations map[string]types.Aggregate `json:"aggregations"`
 }
 
-// parseTypedSearchResult 将 ES8 TypedAPI 响应解析为泛型结果。
+// parseTypedSearchResult 将 ES9 TypedAPI 响应解析为泛型结果。
 func parseTypedSearchResult[T any](resp *search.Response) (*SearchResult[T], error) {
 	result := &SearchResult[T]{
 		Highlights: make(map[string]HitHighlight),
