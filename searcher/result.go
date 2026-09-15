@@ -3,6 +3,7 @@ package searcher
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 
 	"github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
@@ -57,9 +58,7 @@ func parseTypedSearchResult[T any](resp *search.Response) (*SearchResult[T], err
 		// 高亮
 		if len(hit.Highlight) > 0 && hit.Id_ != nil {
 			hl := HitHighlight{Fields: make(map[string][]string, len(hit.Highlight))}
-			for field, fragments := range hit.Highlight {
-				hl.Fields[field] = fragments
-			}
+			maps.Copy(hl.Fields, hit.Highlight)
 			result.Highlights[*hit.Id_] = hl
 		}
 	}

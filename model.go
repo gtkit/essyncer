@@ -245,12 +245,11 @@ func hasSoftDeleteField(model any) bool {
 	if t.Kind() != reflect.Struct {
 		return false
 	}
-	return containsType(t, reflect.TypeOf(gorm.DeletedAt{}))
+	return containsType(t, reflect.TypeFor[gorm.DeletedAt]())
 }
 
 func containsType(t, target reflect.Type) bool {
-	for i := range t.NumField() {
-		field := t.Field(i)
+	for field := range t.Fields() {
 		if field.Type == target {
 			return true
 		}

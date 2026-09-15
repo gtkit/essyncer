@@ -89,6 +89,7 @@ func DefaultConfig() Config {
 }
 
 func LoadConfig(path string) (Config, error) {
+	// #nosec G304 -- 读调用方指定的配置文件是本函数的职责，路径可变是 API 契约的一部分
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("essyncer: read config %s: %w", path, err)
@@ -101,6 +102,7 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func LoadMappingFromFile(path string) (json.RawMessage, error) {
+	// #nosec G304 -- 读调用方指定的 mapping 文件是本函数的职责，路径可变是 API 契约的一部分
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("essyncer: read mapping %s: %w", path, err)

@@ -89,16 +89,19 @@ func (b *NumRangeBuilder) Gt(v float64) *NumRangeBuilder {
 	b.q.Gt = &f
 	return b
 }
+
 func (b *NumRangeBuilder) Gte(v float64) *NumRangeBuilder {
 	f := types.Float64(v)
 	b.q.Gte = &f
 	return b
 }
+
 func (b *NumRangeBuilder) Lt(v float64) *NumRangeBuilder {
 	f := types.Float64(v)
 	b.q.Lt = &f
 	return b
 }
+
 func (b *NumRangeBuilder) Lte(v float64) *NumRangeBuilder {
 	f := types.Float64(v)
 	b.q.Lte = &f
@@ -142,14 +145,17 @@ func (b *BoolBuilder) Must(queries ...types.Query) *BoolBuilder {
 	b.q.Must = append(b.q.Must, queries...)
 	return b
 }
+
 func (b *BoolBuilder) Should(queries ...types.Query) *BoolBuilder {
 	b.q.Should = append(b.q.Should, queries...)
 	return b
 }
+
 func (b *BoolBuilder) MustNot(queries ...types.Query) *BoolBuilder {
 	b.q.MustNot = append(b.q.MustNot, queries...)
 	return b
 }
+
 func (b *BoolBuilder) Filter(queries ...types.Query) *BoolBuilder {
 	b.q.Filter = append(b.q.Filter, queries...)
 	return b

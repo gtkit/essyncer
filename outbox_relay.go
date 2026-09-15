@@ -50,10 +50,8 @@ func (s *Syncer) StartOutboxRelay(ctx context.Context) error {
 	relayCtx, cancel := context.WithCancel(ctx)
 	s.relayCancel = cancel
 	s.relayRunning = true
-	s.relayWG.Add(1)
 
-	go func() {
-		defer s.relayWG.Done()
+	s.relayWG.Go(func() {
 		defer func() {
 			s.relayMu.Lock()
 			s.relayRunning = false
@@ -64,7 +62,7 @@ func (s *Syncer) StartOutboxRelay(ctx context.Context) error {
 		// 不拦住 panic，一次投递路径上的编程错误就会带走接入方的整个进程。
 		defer s.recoverRelayPanic()
 		_ = s.runOutboxRelay(relayCtx)
-	}()
+	})
 
 	return nil
 }
@@ -303,13 +301,7 @@ func (s *Syncer) relayBackoff(attempt int) time.Duration {
 	if base <= 0 {
 		base = 2 * time.Second
 	}
-	shift := attempt - 1
-	if shift < 0 {
-		shift = 0
-	}
-	if shift > 8 {
-		shift = 8
-	}
+	shift := min(max(attempt-1, 0), 8)
 	return base * time.Duration(1<<shift)
 }
 

@@ -222,9 +222,7 @@ func TestMySQLOutboxClaim_ConcurrentRelaysClaimDisjointRows(t *testing.T) {
 		wg      sync.WaitGroup
 	)
 	for range relayCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			store := newOutboxStore(db)
 			rows, err := store.claimPending(t.Context(), rowCount, 30*time.Second)
 			if err != nil {
@@ -234,7 +232,7 @@ func TestMySQLOutboxClaim_ConcurrentRelaysClaimDisjointRows(t *testing.T) {
 			mu.Lock()
 			claimed = append(claimed, rows...)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 

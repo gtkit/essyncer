@@ -102,10 +102,7 @@ func (s *outboxStore) claimPending(ctx context.Context, batchSize int, leaseDura
 	now := s.now().UTC()
 	leaseUntil := now.Add(leaseDuration)
 	claimed := make([]OutboxEvent, 0, batchSize)
-	candidateLimit := batchSize * 4
-	if candidateLimit < batchSize {
-		candidateLimit = batchSize
-	}
+	candidateLimit := max(batchSize*4, batchSize)
 	var candidates []OutboxEvent
 
 	if err := s.db.WithContext(ctx).Model(&OutboxEvent{}).

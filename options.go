@@ -107,10 +107,13 @@ func WithBatchSize(size int) RegisterOption {
 		}
 	}
 }
+
 func WithAutoSync(enabled bool) RegisterOption { return func(e *modelEntry) { e.autoSync = enabled } }
+
 func WithSoftDeleteMode(mode SoftDeleteMode) RegisterOption {
 	return func(e *modelEntry) { e.softDeleteMode = mode }
 }
+
 func WithFullDocUpdate(enabled bool) RegisterOption {
 	return func(e *modelEntry) { e.fullDocUpdate = enabled }
 }

@@ -161,13 +161,13 @@ func TestNewFullSyncKey(t *testing.T) {
 // --- Model Slice ---
 
 func TestNewModelSlice(t *testing.T) {
-	entry := &modelEntry{modelType: reflect.TypeOf(testArticle{})}
+	entry := &modelEntry{modelType: reflect.TypeFor[testArticle]()}
 	slicePtr := newModelSlice(entry)
 	v := reflect.ValueOf(slicePtr)
 	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Slice {
 		t.Fatal("expected pointer to slice")
 	}
-	if v.Elem().Type().Elem() != reflect.TypeOf(testArticle{}) {
+	if v.Elem().Type().Elem() != reflect.TypeFor[testArticle]() {
 		t.Errorf("unexpected element type: %v", v.Elem().Type().Elem())
 	}
 }

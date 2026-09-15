@@ -59,7 +59,7 @@ func TestOutboxRelay_StatusTransitions(t *testing.T) {
 		{
 			name:               "exhausted failure transitions to dead when attempts reach configured max",
 			seedAttempts:       2,
-			maxAttempts:        ptrInt(2),
+			maxAttempts:        new(2),
 			transportCode:      http.StatusTooManyRequests,
 			action:             string(actionDelete),
 			payload:            nil,
@@ -480,6 +480,4 @@ func waitFor(ctx context.Context, timeout time.Duration, check func() (bool, err
 	}
 }
 
-func ptrInt(n int) *int {
-	return &n
-}
+//go:fix inline

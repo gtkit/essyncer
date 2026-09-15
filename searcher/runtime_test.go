@@ -384,10 +384,10 @@ func TestParseTypedSearchResult_WithHighlights(t *testing.T) {
 			resp: &search.Response{
 				Hits: types.HitsMetadata{
 					Total:    &types.TotalHits{Value: 1},
-					MaxScore: ptrFloat64(types.Float64(1.0)),
+					MaxScore: new(types.Float64(1.0)),
 					Hits: []types.Hit{
 						{
-							Id_:       ptrString("1"),
+							Id_:       new("1"),
 							Source_:   json.RawMessage(`{"id":"1","name":"alice"}`),
 							Highlight: map[string][]string{"title": {"<em>alice</em>"}},
 						},
@@ -415,10 +415,6 @@ type capturedRequest struct {
 	Body string
 }
 
-func ptrString(value string) *string {
-	return &value
-}
+//go:fix inline
 
-func ptrFloat64(value types.Float64) *types.Float64 {
-	return &value
-}
+//go:fix inline

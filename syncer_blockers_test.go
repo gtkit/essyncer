@@ -227,14 +227,14 @@ type aliasUpdateRequest struct {
 		Add struct {
 			Alias string `json:"alias"`
 			Index string `json:"index"`
-		} `json:"add,omitempty"`
+		} `json:"add"`
 		Remove struct {
 			Alias string `json:"alias"`
 			Index string `json:"index"`
-		} `json:"remove,omitempty"`
+		} `json:"remove"`
 		RemoveIndex struct {
 			Index string `json:"index"`
-		} `json:"remove_index,omitempty"`
+		} `json:"remove_index"`
 	} `json:"actions"`
 }
 

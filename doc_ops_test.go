@@ -105,25 +105,25 @@ func TestParsePrimaryKeyValueAndModelLookup(t *testing.T) {
 	}{
 		{
 			name:  "string primary key parses directly",
-			field: &schema.Field{IndirectFieldType: reflect.TypeOf("")},
+			field: &schema.Field{IndirectFieldType: reflect.TypeFor[string]()},
 			raw:   "doc-1",
 			want:  "doc-1",
 		},
 		{
 			name:  "int primary key parses as int64",
-			field: &schema.Field{IndirectFieldType: reflect.TypeOf(int64(0))},
+			field: &schema.Field{IndirectFieldType: reflect.TypeFor[int64]()},
 			raw:   "42",
 			want:  int64(42),
 		},
 		{
 			name:  "uint primary key parses as uint64",
-			field: &schema.Field{IndirectFieldType: reflect.TypeOf(uint64(0))},
+			field: &schema.Field{IndirectFieldType: reflect.TypeFor[uint64]()},
 			raw:   "24",
 			want:  uint64(24),
 		},
 		{
 			name:            "invalid integer returns wrapped error",
-			field:           &schema.Field{IndirectFieldType: reflect.TypeOf(int64(0))},
+			field:           &schema.Field{IndirectFieldType: reflect.TypeFor[int64]()},
 			raw:             "nope",
 			wantErrContains: "parse int primary key",
 		},

@@ -135,7 +135,6 @@ func Example_ginProduction() {
 			WithSingleflight(). // 合并相同查询的并发请求
 			Page(page, pageSize).
 			Do(c.Request.Context())
-
 		if err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
@@ -155,7 +154,6 @@ func Example_ginProduction() {
 			Agg("by_category", searcher.TermsAgg("category", 20)).
 			Agg("monthly", searcher.DateHistogramAgg("created_at", "month")).
 			DoAgg(c.Request.Context())
-
 		if err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
